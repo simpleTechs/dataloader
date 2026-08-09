@@ -26,6 +26,7 @@
 
 package com.salesforce.dataloader.mapping;
 
+import com.salesforce.dataloader.ConfigTestBase;
 import com.salesforce.dataloader.mapping.SOQLInfo.SOQLFieldInfo;
 import com.salesforce.dataloader.mapping.SOQLInfo.SOQLParserException;
 import org.junit.Assert;
@@ -42,7 +43,7 @@ import static org.junit.Assert.assertNull;
  * @author Colin Jarvis
  * @since 21.0
  */
-public class SoqlInfoTest {
+public class SoqlInfoTest extends ConfigTestBase {
 
     @Test
     public void testParseSoql() throws SOQLParserException {
@@ -95,8 +96,8 @@ public class SoqlInfoTest {
         try {
             new SOQLInfo("select  from account  where id = ''");
             Assert.fail("should not be able to parse query");
-        } catch (IllegalArgumentException e) {
-            assertEquals("Cannot parse empty string", e.getMessage());
+        } catch (Exception e) {
+            assertEquals("Invalid soql: No sobject specified after 'FROM' keyword", e.getMessage());
         }
     }
 
@@ -175,7 +176,7 @@ public class SoqlInfoTest {
     @Test
     public void testNestedQuery() {
         runInvalidQueryTest("select id, (select name from contacts) from account blarney",
-                "Nested queries are not supported");
+                "Nested queries are not supported in SOQL SELECT clause");
     }
 
     @Test

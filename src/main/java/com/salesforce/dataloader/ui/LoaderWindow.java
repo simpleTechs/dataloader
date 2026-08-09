@@ -33,23 +33,21 @@ import org.eclipse.jface.action.MenuManager;
 import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.window.ApplicationWindow;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.CLabel;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.*;
-import org.eclipse.swt.graphics.Color;
-import org.eclipse.swt.graphics.Font;
 import org.eclipse.swt.layout.FillLayout;
+import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.RowLayout;
 import org.eclipse.swt.widgets.*;
 
 import com.salesforce.dataloader.action.OperationInfo;
-import com.salesforce.dataloader.config.Config;
-import com.salesforce.dataloader.config.Config.ConfigListener;
+import com.salesforce.dataloader.config.AppConfig;
+import com.salesforce.dataloader.config.AppConfig.ConfigListener;
 import com.salesforce.dataloader.controller.Controller;
 import com.salesforce.dataloader.ui.uiActions.*;
-import org.eclipse.swt.widgets.Button;
-import org.eclipse.swt.widgets.Composite;
-import org.eclipse.swt.widgets.Label;
+import com.salesforce.dataloader.util.AppUtil;
 
 /**
  * The main class for the Loader UI.
@@ -81,6 +79,7 @@ public class LoaderWindow extends ApplicationWindow {
 
 
     private static LoaderWindow app;
+    private Shell shell;
 
     public LoaderWindow(Controller controller) {
         super(null);
@@ -99,34 +98,32 @@ public class LoaderWindow extends ApplicationWindow {
 
         app = this;
 
-        addMenuBar();
         addStatusLine();
-
-        // load values from last run
-        controller.getConfig().initLastRunFile();
         this.controller = controller;
-
-        final ConfigListener listener = new ConfigListener() {
-            @Override
-            public void configValueChanged(String key, String oldValue, String newValue) {
-                if (Config.BULK_API_ENABLED.equals(key)) {
-                    boolean boolVal = false;
-                    if (newValue != null) boolVal = Boolean.valueOf(newValue);
-                    LoaderWindow.this.operationButtonsByIndex.get(OperationInfo.hard_delete).setEnabled(boolVal);
-                    LoaderWindow.this.operationActionsByIndex.get(OperationInfo.hard_delete.getDialogIdx()).setEnabled(
-                            boolVal);
-                    getShell().redraw();
-                }
-            }
-        };
-
-        this.controller.getConfig().addListener(listener);
-
+    }
+    
+    public void refresh() {
+        AppConfig appConfig = controller.getAppConfig();
+        boolean isBulkApiFlavorEnabled = appConfig.isBulkAPIEnabled() || appConfig.isBulkV2APIEnabled();
+        LoaderWindow.this.operationButtonsByIndex.get(OperationInfo.hard_delete).setEnabled(isBulkApiFlavorEnabled);
+        LoaderWindow.this.operationActionsByIndex.get(OperationInfo.hard_delete.getDialogIdx()).setEnabled(
+                isBulkApiFlavorEnabled);
+        
+        // disable Undelete button and action if bulk API is enabled
+        LoaderWindow.this.operationButtonsByIndex.get(OperationInfo.undelete).setEnabled(!isBulkApiFlavorEnabled);
+        LoaderWindow.this.operationActionsByIndex.get(OperationInfo.undelete.getDialogIdx()).setEnabled(
+                !isBulkApiFlavorEnabled);
+        getShell().redraw();
     }
 
     public void dispose() {
         // make sure configuration gets written
         if(this.controller != null) {
+            // Clear metadata client cache and entity selection to prevent stale org data on restart
+            if (this.controller.isLoggedIn()) {
+                this.controller.getSObjectMetaDataClient().logout();
+                this.controller.getAppConfig().setValue(com.salesforce.dataloader.config.AppConfig.PROP_ENTITY, "");
+            }
             controller.saveConfig();
         }
     }
@@ -144,27 +141,52 @@ public class LoaderWindow extends ApplicationWindow {
      * This runs the Loader Window
      */
     public void run() {
-
+        AppConfig appConfig = controller.getAppConfig();
+        if (!appConfig.getBoolean(AppConfig.PROP_HIDE_WELCOME_SCREEN)) {
+            displayTitleDialog(Display.getDefault(), this.operationActionsByIndex, this.controller.getAppConfig());
+        }
+        if (appConfig.getBoolean(AppConfig.PROP_SHOW_LOADER_UPGRADE_SCREEN)) {
+            displayUpgradeDialog(Display.getDefault());
+        }
         setBlockOnOpen(true);
+        addMenuBar();
         open();
 
-        Display.getCurrent().dispose();
+        Display currentDisplay = Display.getCurrent();
+        if (currentDisplay != null) {
+            currentDisplay.dispose();
+        }
+    }
+    
+    public void updateTitle(String suffix) {
+        if (suffix == null || suffix.isEmpty()) {
+            suffix = "";
+            this.uiActionLogout.setEnabled(false);
+        } else {
+            suffix = " - " + suffix;
+            this.uiActionLogout.setEnabled(true);
+        }
+        this.shell.setText(Labels.getString("LoaderWindow.title") + suffix);
     }
 
     @Override
     protected void configureShell(Shell shell) {
         super.configureShell(shell);
 
+        this.shell = shell;
         // Set the title bar text
-        shell.setText(Labels.getString("LoaderWindow.title"));
+        updateTitle(null);
         shell.setSize(600, 400);
+        Point shellLocation = shell.getLocation();
+        if (shellLocation.x < AppConfig.DEFAULT_WIZARD_X_OFFSET) {
+            shellLocation.x = AppConfig.DEFAULT_WIZARD_X_OFFSET;
+            shell.setLocation(shellLocation);
+        }
 
         shell.setImage(UIUtils.getImageRegistry().get("sfdc_icon"));
-
-
     }
 
-    private OperationUIAction getOperationAction(int i) {
+    public OperationUIAction getOperationAction(int i) {
         return this.operationActionsByIndex.get(i);
     }
 
@@ -174,40 +196,44 @@ public class LoaderWindow extends ApplicationWindow {
 
         createButtons(comp);
 
-        getStatusLineManager().setMessage(Labels.getString("LoaderWindow.chooseAction"));
-
-        Config config = controller.getConfig();
-
-        if (!config.getBoolean(config.HIDE_WELCOME_SCREEN)) {
-            displayTitleDialog(Display.getDefault(), this.operationActionsByIndex, this.controller.getConfig());
-        }
-
+        getStatusLineManager().setMessage(Labels.getString("LoaderWindow.chooseAction"));        
         comp.pack();
         parent.pack();
-
         return parent;
-
     }
 
     private Composite createContainer(Composite parent) {
         Composite comp = new Composite(parent, SWT.BORDER);
-        setBackground(comp);
         comp.setLayout(new FillLayout(SWT.VERTICAL));
-        Label label = new Label(comp, SWT.CENTER);
-        setBackground(label);
+        
+        Composite logoComp = new Composite(comp, SWT.NONE);
+        logoComp.setLayout(new FillLayout(SWT.HORIZONTAL));
+        CLabel label = new CLabel(logoComp, SWT.RIGHT);
         label.setImage(UIUtils.getImageRegistry().get("title_logo"));
+        GridData gridData = new GridData();
+        gridData.horizontalAlignment = GridData.BEGINNING;
+        gridData.grabExcessHorizontalSpace = false;
+        gridData.verticalAlignment = GridData.VERTICAL_ALIGN_CENTER;
+        gridData.grabExcessVerticalSpace = true;
+        label.setLayoutData(gridData);
+        
+        label = new CLabel(logoComp, SWT.NONE);
+        FontData fd = new FontData("Verdana", 28, SWT.NORMAL);
+        label.setFont(new Font(Display.getCurrent(), fd));
+        label.setText("data loader");
+        gridData = new GridData();
+        gridData.horizontalAlignment = GridData.BEGINNING;
+        gridData.grabExcessHorizontalSpace = false;
+        gridData.verticalAlignment = GridData.VERTICAL_ALIGN_FILL;
+        gridData.grabExcessVerticalSpace = true;
+        label.setLayoutData(gridData);
+
         comp.pack();
-
         return comp;
-    }
-
-    private void setBackground(Control comp) {
-        comp.setBackground(new Color(Display.getCurrent(), 238,241,246));
     }
 
     private void createButtons(Composite parent) {
         Composite buttons = new Composite(parent, SWT.NONE);
-        setBackground(buttons);
         RowLayout rowLayout = new RowLayout(SWT.HORIZONTAL);
         rowLayout.wrap = true;
         rowLayout.pack = false;
@@ -222,16 +248,14 @@ public class LoaderWindow extends ApplicationWindow {
         for (final OperationInfo info : OperationInfo.ALL_OPERATIONS_IN_ORDER) {
             createOperationButton(buttons, info);
         }
-        // buttons.pack();
     }
 
     private void createOperationButton(Composite parent, final OperationInfo info) {
 
         final Button butt = new Button(parent, SWT.PUSH | SWT.FLAT);
         butt.setText(info.getLabel());
-        butt.setEnabled(info.isOperationAllowed(this.controller.getConfig()));
-        butt.setImage(info.getIconImage());
-        butt.setBackground(Display.getCurrent().getSystemColor(SWT.COLOR_WHITE));
+        butt.setEnabled(info.isOperationAllowed(this.controller.getAppConfig()));
+        butt.setImage(info.getUIHelper().getIconImage());
         butt.addSelectionListener(new SelectionAdapter() {
             @Override
             public void widgetSelected(SelectionEvent selectionEvent) {
@@ -242,16 +266,30 @@ public class LoaderWindow extends ApplicationWindow {
     }
 
     private void displayTitleDialog(final Display display, final TreeMap<Integer, OperationUIAction> map,
-            final Config cfg) {
+            final AppConfig cfg) {
 
         display.asyncExec(new Thread() {
             @Override
             public void run() {
-                LoaderTitleDialog dlg = new LoaderTitleDialog(display.getActiveShell(), cfg);
+                WelcomeScreenDialog dlg = new WelcomeScreenDialog(display.getActiveShell(), cfg);
                 int result = dlg.open();
 
-                for (Entry<Integer, OperationUIAction> ent : map.entrySet())
+                for (Entry<Integer, OperationUIAction> ent : map.entrySet()) {
                     if (result == ent.getKey()) ent.getValue().run();
+                }
+            }
+        });
+    }
+    
+    private void displayUpgradeDialog(final Display display) {
+        if (AppUtil.DATALOADER_VERSION.equals(controller.getLatestDownloadableDataLoaderVersion())) {
+            return; // running app's version matches with downloadable version.
+        }
+        display.asyncExec(new Thread() {
+            @Override
+            public void run() {
+                LoaderUpgradeDialog dlg = new LoaderUpgradeDialog(display.getActiveShell(), controller);
+                dlg.open();
             }
         });
     }

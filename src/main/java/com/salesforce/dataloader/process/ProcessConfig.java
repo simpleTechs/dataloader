@@ -54,11 +54,12 @@ package com.salesforce.dataloader.process;
 
 import java.io.File;
 
-import org.apache.log4j.Logger;
-
+import org.apache.logging.log4j.Logger;
+import com.salesforce.dataloader.util.DLLogManager;
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.config.Messages;
-import com.salesforce.dataloader.controller.Controller;
 import com.salesforce.dataloader.exception.ProcessInitializationException;
+
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.support.FileSystemXmlApplicationContext;
 
@@ -70,7 +71,7 @@ import org.springframework.context.support.FileSystemXmlApplicationContext;
  */
 public class ProcessConfig {
 
-    private static Logger logger = Logger.getLogger(ProcessConfig.class);
+    private static Logger logger = DLLogManager.getLogger(ProcessConfig.class);
 
     public final static String DEFAULT_CONFIG_FILENAME = "process-conf.xml";
     private final static String DEFAULT_SCHEDULER_FACTORY_NAME = "schedulerFactory";
@@ -80,7 +81,7 @@ public class ProcessConfig {
     }
 
     private static String getConfigFileLocation() {
-        File confFile = new File(Controller.getConfigDir(), DEFAULT_CONFIG_FILENAME);
+        File confFile = new File(AppConfig.getConfigurationsDir(), DEFAULT_CONFIG_FILENAME);
         return confFile.getAbsolutePath();
     }
 

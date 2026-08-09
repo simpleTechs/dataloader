@@ -25,13 +25,18 @@
  */
 package com.salesforce.dataloader.dao.database;
 
+import com.salesforce.dataloader.ConfigTestBase;
 import com.salesforce.dataloader.controller.Controller;
 import com.salesforce.dataloader.exception.DataAccessObjectException;
 import com.salesforce.dataloader.exception.DataAccessObjectInitializationException;
-import com.salesforce.dataloader.model.Row;
+import com.salesforce.dataloader.model.TableHeader;
+import com.salesforce.dataloader.model.TableRow;
+
 import junit.framework.TestCase;
-import org.apache.commons.dbcp.BasicDataSource;
-import org.apache.log4j.Logger;
+import org.apache.commons.dbcp2.BasicDataSource;
+import org.apache.logging.log4j.Logger;
+import com.salesforce.dataloader.util.DLLogManager;
+
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.rowset.SqlRowSet;
 
@@ -53,9 +58,10 @@ import java.util.Map;
  * @author Alex Warshavsky
  * @since 8.0
  */
-public class DatabaseTestUtil {
+@SuppressWarnings("serial")
+public class DatabaseTestUtil extends ConfigTestBase {
 
-    private static final Logger logger = Logger.getLogger(DatabaseTestUtil.class);
+    private static final Logger logger = DLLogManager.getLogger(DatabaseTestUtil.class);
 
     public enum DateType {CALENDAR, DATE, STRING, VALIDATION, NULL;};
 
@@ -75,7 +81,7 @@ public class DatabaseTestUtil {
         put(REVENUE_COL, "decimal");
         put(LAST_UPDATED_COL, "date");
         put(ACCOUNT_NUMBER_COL, "varchar(20)");
-        put("system_modstamp", "date default sysdate not null");
+        put("system_modstamp", "date default CURRENT_TIMESTAMP not null");
     }};
 
     public static void insertOrUpdateAccountsDb(Controller theController, boolean isInsert, int numAccounts, boolean insertNulls) {
@@ -93,18 +99,18 @@ public class DatabaseTestUtil {
             SqlConfig sqlConfig = dbConfig.getSqlConfig();
             // override the configured sqltype for the last_update column
             sqlConfig.getSqlParams().put(LAST_UPDATED_COL, dateClass.getName());
-            writer = new DatabaseWriter(theController.getConfig(), dbConfigName, dataSource, sqlConfig);
+            writer = new DatabaseWriter(theController.getAppConfig(), dbConfigName, dataSource, sqlConfig);
             writer.open();
-            List<Row> accountRowList = new ArrayList<Row>();
+            List<TableRow> accountRowList = new ArrayList<TableRow>();
             int rowsProcessed = 0;
             for(int i=0; i < numAccounts; i++) {
-                Row accountRow = getInsertOrUpdateAccountRow(isInsert, i, dateType, insertNulls);
+                TableRow accountRow = getInsertOrUpdateAccountRow(isInsert, i, dateType, insertNulls);
                 accountRowList.add(accountRow);
                 if(accountRowList.size() >= 1000 || i == (numAccounts-1)) {
                     rowsProcessed += accountRowList.size();
                     writer.writeRowList(accountRowList);
                     logger.info("Written " + rowsProcessed + " of " + numAccounts + " total accounts using database config: " + dbConfigName);
-                    accountRowList = new ArrayList<Row>();
+                    accountRowList = new ArrayList<TableRow>();
                 }
             }
         } catch (DataAccessObjectInitializationException e) {
@@ -117,12 +123,12 @@ public class DatabaseTestUtil {
         }
     }
 
-    public static Row getInsertOrUpdateAccountRow(boolean isInsert, int seqNum, DateType dateType) {
+    public static TableRow getInsertOrUpdateAccountRow(boolean isInsert, int seqNum, DateType dateType) {
         return getInsertOrUpdateAccountRow(isInsert, seqNum, dateType, false);
     }
 
     public static DatabaseConfig getDatabaseConfig(Controller controller, String dbConfigName) {
-        String dbConfigFilename = controller.getConfig().constructConfigFilePath(
+        String dbConfigFilename = controller.getAppConfig().constructConfigFilePath(
                 DatabaseContext.DEFAULT_CONFIG_FILENAME);
         return DatabaseConfig.getInstance(dbConfigFilename, dbConfigName);
     }
@@ -138,8 +144,18 @@ public class DatabaseTestUtil {
      * @param dateType Type for the date field values
      * @return Row containing account data based on seqNum
      */
-    public static Row getInsertOrUpdateAccountRow(boolean isInsert, int seqNum, DateType dateType, boolean insertNulls) {
-        Row row = new Row();
+    public static TableRow getInsertOrUpdateAccountRow(boolean isInsert, int seqNum, DateType dateType, boolean insertNulls) {
+        ArrayList<String> headerLabelList = new ArrayList<String>();
+        headerLabelList.add(EXT_ID_COL);
+        headerLabelList.add(NAME_COL);
+        headerLabelList.add(SFDC_ID_COL);
+        headerLabelList.add(ACCOUNT_NUMBER_COL);
+        headerLabelList.add(PHONE_COL);
+        headerLabelList.add(REVENUE_COL);
+        headerLabelList.add(LAST_UPDATED_COL);
+
+        TableHeader header = new TableHeader(headerLabelList);
+        TableRow row = new TableRow(header);
         String operation;
         int seqInt;
         // external id is the key, use normal sequencing for update so the same set of records gets updated as inserted
@@ -196,7 +212,7 @@ public class DatabaseTestUtil {
     public static void deleteAllAccountsDb(Controller theController) throws Exception {
         DatabaseWriter writer = null;
         try {
-            writer = new DatabaseWriter(theController.getConfig(), "deleteAccountAll");
+            writer = new DatabaseWriter(theController.getAppConfig(), "deleteAccountAll");
             writer.open();
             logger.info("Deleting all Accounts from database, using configuration: " + "deleteAccountAll");
             writer.writeRow(null);

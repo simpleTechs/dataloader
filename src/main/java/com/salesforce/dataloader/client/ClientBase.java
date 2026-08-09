@@ -26,17 +26,22 @@
 package com.salesforce.dataloader.client;
 
 import java.io.FileNotFoundException;
-import java.net.MalformedURLException;
-import java.net.URL;
 
-import org.apache.log4j.Logger;
+import org.apache.logging.log4j.Logger;
 
 import com.salesforce.dataloader.client.SessionInfo.NotLoggedInException;
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.client.transport.TransportFactoryImpl;
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.config.Messages;
 import com.salesforce.dataloader.controller.Controller;
+import com.salesforce.dataloader.dao.DataAccessObjectFactory;
 import com.salesforce.dataloader.exception.ParameterLoadException;
+import com.salesforce.dataloader.util.AppUtil;
 import com.sforce.soap.partner.Connector;
+import com.sforce.soap.partner.GetUserInfoResult;
+import com.sforce.soap.partner.fault.ApiFault;
+import com.sforce.soap.partner.fault.LoginFault;
+import com.sforce.ws.ConnectionException;
 import com.sforce.ws.ConnectorConfig;
 
 /**
@@ -45,38 +50,77 @@ import com.sforce.ws.ConnectorConfig;
  * @author Colin Jarvis
  * @since 17.0
  */
-public abstract class ClientBase<ClientType> {
+public abstract class ClientBase<ConnectionType> {
 
-    private static Logger LOG = Logger.getLogger(PartnerClient.class);
-
-    protected static final URL DEFAULT_AUTH_ENDPOINT_URL;
-    static {
-        URL loginUrl;
-        try {
-            loginUrl = new URL(Connector.END_POINT);
-        } catch (MalformedURLException ex) {
-            LOG.error(ex);
-            throw new RuntimeException(ex);
-        }
-        DEFAULT_AUTH_ENDPOINT_URL = loginUrl;
-    }
-
-    public static final String REST_ENDPOINT = "/services/async/" + Controller.API_VERSION;
+    private static String apiVersionForTheSession = getCurrentAPIVersionInWSC();
 
     protected final Logger logger;
     protected final Controller controller;
-    protected final Config config;
+    protected final AppConfig appConfig;
+    private ConnectionType connectionType;
 
     private SessionInfo session = new SessionInfo();
 
     protected abstract boolean connectPostLogin(ConnectorConfig connectorConfig);
 
-    public abstract ClientType getClient();
+    public ConnectionType getConnection() {
+        return this.connectionType;
+    }
+    
 
+    protected static interface ClientOperation<RESULT, ARG> {
+        String getName();
+        RESULT run(ARG arg) throws ConnectionException;
+    }
+    
+    protected <R, A> R runOperation(ClientOperation<R, A> op, A arg) throws ConnectionException {
+        logger.debug(Messages.getFormattedString("Client.beginOperation", op.getName())); //$NON-NLS-1$
+        if (!controller.getLoginClient().isSessionValid()) {
+        	controller.getLoginClient().connect();
+        }
+        ConnectionException connectionException = null;
+        try {
+            R result = op.run(arg);
+            if (result == null)
+                logger.info(Messages.getString("Client.resultNull")); //$NON-NLS-1$
+            this.getSession().performedSessionActivity(); // reset session activity timer
+            return result;
+        } catch (ConnectionException ex) {
+            String exceptionMessage = ex.getMessage();
+            if (ex instanceof LoginFault) {
+                LoginFault lf = (LoginFault)ex;
+                exceptionMessage = lf.getExceptionMessage();
+            }
+
+            logger.error(
+                    Messages.getFormattedString(
+                            "Client.operationError", new String[]{op.getName(), exceptionMessage}), ex); //$NON-NLS-1$
+            if (ex instanceof ApiFault) {
+                ApiFault fault = (ApiFault)ex;
+                String faultMessage = fault.getExceptionMessage();
+                logger.error(
+                        Messages.getFormattedString(
+                                "Client.operationError", new String[]{op.getName(), faultMessage}), fault); //$NON-NLS-1$
+
+            }
+            // check retries
+            connectionException = ex;
+        }
+        throw connectionException;
+    }
+    
+    protected void setConnection(ConnectionType connType) {
+        this.connectionType = connType;
+    }
+    
     protected ClientBase(Controller controller, Logger logger) {
         this.controller = controller;
-        this.config = controller.getConfig();
+        this.appConfig = controller.getAppConfig();
         this.logger = logger;
+        String apiVersionStr = appConfig.getString(AppConfig.PROP_API_VERSION);
+        if (apiVersionStr != null && !apiVersionStr.isEmpty()) {
+            apiVersionForTheSession = apiVersionStr;
+        }
     }
 
     public final boolean connect(SessionInfo sess) {
@@ -86,76 +130,88 @@ public abstract class ClientBase<ClientType> {
 
     private static final String BASE_CLIENT_NAME = "DataLoader";
     private static final String BULK_API_CLIENT_TYPE = "Bulk";
+    private static final String BULK_V2_API_CLIENT_TYPE = "Bulkv2";
     private static final String PARTNER_API_CLIENT_TYPE = "Partner";
     private static final String BATCH_CLIENT_STRING = "Batch";
     private static final String UI_CLIENT_STRING = "UI";
+    public static final String SFORCE_CALL_OPTIONS_HEADER = "Sforce-Call-Options";
 
-    protected static String getClientName(Config cfg) {
-        final String apiType = cfg.isBulkAPIEnabled() ? BULK_API_CLIENT_TYPE : PARTNER_API_CLIENT_TYPE;
-        final String interfaceType = cfg.isBatchMode() ? BATCH_CLIENT_STRING : UI_CLIENT_STRING;
-        return new StringBuilder(32).append(BASE_CLIENT_NAME).append(apiType).append(interfaceType)
-                .append("/").append(Controller.API_VERSION).toString(); //$NON-NLS-1$
+    public static String getClientName(AppConfig cfg) {
+        return getClientName(cfg.isBulkAPIEnabled(), cfg.isBulkV2APIEnabled(),
+                cfg.isBatchMode(), cfg.isExternalClientAppConfigured(), Controller.APP_VERSION,
+                cfg.getString(AppConfig.PROP_DAO_TYPE));
     }
 
-    protected ConnectorConfig getConnectorConfig() {
+    // Kept for source-compatibility with existing tests; delegates to the 6-arg overload below.
+    static String getClientName(boolean bulkAPI, boolean bulkV2API,
+                                boolean batchMode, boolean externalClientApp, String appVersion) {
+        return getClientName(bulkAPI, bulkV2API, batchMode, externalClientApp, appVersion, null);
+    }
+
+    // W-22717496: append DAO-type suffix so apusg can measure direct-DB-access usage
+    static String getClientName(boolean bulkAPI, boolean bulkV2API,
+                                boolean batchMode, boolean externalClientApp,
+                                String appVersion, String daoType) {
+        String apiType = PARTNER_API_CLIENT_TYPE;
+        if (bulkAPI) {
+            apiType = BULK_API_CLIENT_TYPE;
+        } else if (bulkV2API) {
+            apiType = BULK_V2_API_CLIENT_TYPE;
+        }
+
+        String interfaceType = externalClientApp
+                ? ""
+                : (batchMode ? BATCH_CLIENT_STRING : UI_CLIENT_STRING);
+
+        StringBuilder sb = new StringBuilder(32).append(BASE_CLIENT_NAME).append(apiType).append(interfaceType)
+                .append("/")
+                .append(appVersion);
+
+        if (batchMode && daoType != null) {
+            if (DataAccessObjectFactory.DATABASE_READ_TYPE.equalsIgnoreCase(daoType)) {
+                sb.append("/DBR");
+            } else if (DataAccessObjectFactory.DATABASE_WRITE_TYPE.equalsIgnoreCase(daoType)) {
+                sb.append("/DBW");
+            }
+        }
+        return sb.toString();
+    }
+    
+    public static synchronized String getAPIVersionForTheSession() {
+        return apiVersionForTheSession;
+    }
+    
+    public static synchronized void setAPIVersionForTheSession(String version) {
+        apiVersionForTheSession = version;
+    }
+
+    public ConnectorConfig getConnectorConfig() {
         ConnectorConfig cc = new ConnectorConfig();
-        cc.setTransport(HttpClientTransport.class);
+        cc.setTransportFactory(new TransportFactoryImpl());
         cc.setSessionId(getSessionId());
-        
+        cc.setRequestHeader(SFORCE_CALL_OPTIONS_HEADER,
+                "client=" + ClientBase.getClientName(this.appConfig));
         // set authentication credentials
         // blank username is not acceptible
-        String username = config.getString(Config.USERNAME);
-        boolean isManualSession = config.getBoolean(Config.SFDC_INTERNAL) && config.getBoolean(Config.SFDC_INTERNAL_IS_SESSION_ID_LOGIN);
-        boolean isOAuthSession = config.getString(Config.OAUTH_ACCESSTOKEN) != null && config.getString(Config.OAUTH_ACCESSTOKEN).trim().length() > 0;
+        String username = appConfig.getString(AppConfig.PROP_USERNAME);
+        boolean isManualSession = appConfig.getBoolean(AppConfig.PROP_SFDC_INTERNAL) && appConfig.getBoolean(AppConfig.PROP_SFDC_INTERNAL_IS_SESSION_ID_LOGIN);
+        boolean isOAuthSession = appConfig.getString(AppConfig.PROP_OAUTH_ACCESSTOKEN) != null && appConfig.getString(AppConfig.PROP_OAUTH_ACCESSTOKEN).trim().length() > 0;
         if (!isManualSession && !isOAuthSession && (username == null || username.length() == 0)) {
-            String errMsg = Messages.getMessage(getClass(), "emptyUsername", Config.USERNAME);
+            String errMsg = Messages.getMessage(getClass(), "emptyUsername", AppConfig.PROP_USERNAME);
             logger.error(errMsg);
             throw new IllegalStateException(errMsg);
         }
 
         cc.setUsername(username);
-        cc.setPassword(config.getString(Config.PASSWORD));
+        cc.setPassword(appConfig.getString(AppConfig.PROP_PASSWORD));
 
-        // proxy properties
-        try {
-            String proxyHost = config.getString(Config.PROXY_HOST);
-            int proxyPort = config.getInt(Config.PROXY_PORT);
-            if (proxyHost != null && proxyHost.length() > 0 && proxyPort > 0) {
-                logger.info(Messages.getFormattedString(
-                        "Client.sforceLoginProxyDetail", new String[] { proxyHost, String.valueOf(proxyPort) })); //$NON-NLS-1$
-                cc.setProxy(proxyHost, proxyPort);
-
-                String proxyUsername = config.getString(Config.PROXY_USERNAME);
-                if (proxyUsername != null && proxyUsername.length() > 0) {
-                    logger.info(Messages.getFormattedString("Client.sforceLoginProxyUser", proxyUsername)); //$NON-NLS-1$
-                    cc.setProxyUsername(proxyUsername);
-
-                    String proxyPassword = config.getString(Config.PROXY_PASSWORD);
-                    if (proxyPassword != null && proxyPassword.length() > 0) {
-                        logger.info(Messages.getString("Client.sforceLoginProxyPassword")); //$NON-NLS-1$
-                        cc.setProxyPassword(proxyPassword);
-                    } else {
-                        cc.setProxyPassword("");
-                    }
-                }
-
-                String proxyNtlmDomain = config.getString(Config.PROXY_NTLM_DOMAIN);
-                if (proxyNtlmDomain != null && proxyNtlmDomain.length() > 0) {
-                    logger.info(Messages.getFormattedString("Client.sforceLoginProxyNtlm", proxyNtlmDomain)); //$NON-NLS-1$
-                    cc.setNtlmDomain(proxyNtlmDomain);
-                }
-            }
-
-        } catch (ParameterLoadException e) {
-            logger.error(e.getMessage());
-        }
-
+        AppUtil.setConnectorConfigProxySettings(appConfig, cc);
         // Time out after 5 seconds for connection
         int connTimeoutSecs;
         try {
-            connTimeoutSecs = config.getInt(Config.CONNECTION_TIMEOUT_SECS);
+            connTimeoutSecs = appConfig.getInt(AppConfig.PROP_CONNECTION_TIMEOUT_SECS);
         } catch (ParameterLoadException e1) {
-            connTimeoutSecs = Config.DEFAULT_CONNECTION_TIMEOUT_SECS;
+            connTimeoutSecs = AppConfig.DEFAULT_CONNECTION_TIMEOUT_SECS;
         }
         cc.setConnectionTimeout(connTimeoutSecs * 1000);
 
@@ -163,21 +219,22 @@ public abstract class ClientBase<ClientType> {
         // set timeout for operations based on config
         int timeoutSecs;
         try {
-            timeoutSecs = config.getInt(Config.TIMEOUT_SECS);
+            timeoutSecs = appConfig.getInt(AppConfig.PROP_TIMEOUT_SECS);
         } catch (ParameterLoadException e) {
-            timeoutSecs = Config.DEFAULT_TIMEOUT_SECS;
+            timeoutSecs = AppConfig.DEFAULT_TIMEOUT_SECS;
         }
         cc.setReadTimeout((timeoutSecs * 1000));
 
         // use compression or turn it off
-        if (config.contains(Config.NO_COMPRESSION)) {
-            cc.setCompression(!config.getBoolean(Config.NO_COMPRESSION));
+        if (appConfig.contains(AppConfig.PROP_NO_COMPRESSION)) {
+            cc.setCompression(!appConfig.getBoolean(AppConfig.PROP_NO_COMPRESSION));
         }
 
-        if (config.getBoolean(Config.DEBUG_MESSAGES)) {
+        if (appConfig.getBoolean(AppConfig.PROP_DEBUG_MESSAGES)
+                || appConfig.getBoolean(AppConfig.PROP_WIRE_OUTPUT)) {
             cc.setTraceMessage(true);
             cc.setPrettyPrintXml(true);
-            String filename = config.getString(Config.DEBUG_MESSAGES_FILE);
+            String filename = appConfig.getString(AppConfig.PROP_DEBUG_MESSAGES_FILE);
             if (filename.length() > 0) {
                 try {
                     cc.setTraceFile(filename);
@@ -186,15 +243,29 @@ public abstract class ClientBase<ClientType> {
                 }
             }
         }
-
         String server = getSession().getServer();
         if (server != null) {
-            cc.setAuthEndpoint(server + DEFAULT_AUTH_ENDPOINT_URL.getPath());
-            cc.setServiceEndpoint(server + DEFAULT_AUTH_ENDPOINT_URL.getPath());
-            cc.setRestEndpoint(server + REST_ENDPOINT);
+            cc.setAuthEndpoint(server + PartnerClient.getServicePath());
+            cc.setServiceEndpoint(server + PartnerClient.getServicePath()); // Partner SOAP service
+            cc.setRestEndpoint(server + BulkV1Client.getServicePath());  // REST service: Bulk v1
+            logger.info("Post-login endpoint configured: SOAP=" + PartnerClient.getServicePath()
+                    + ", REST=" + BulkV1Client.getServicePath());
         }
 
         return cc;
+    }
+        
+    public static String getCurrentAPIVersionInWSC() {
+        String[] connectURLArray = Connector.END_POINT.split("\\/");
+        return connectURLArray[connectURLArray.length-1];
+    }
+
+    public static String getPreviousAPIVersionInWSC() {
+        String currentAPIVersion = getCurrentAPIVersionInWSC();
+        String[] versionStrArray = currentAPIVersion.split("\\.");
+        String currentMajorVerStr = versionStrArray[0];
+        int currentMajorVer = Integer.parseInt(currentMajorVerStr);
+        return Integer.toString(currentMajorVer-1) + ".0";
     }
 
     public SessionInfo getSession() {
@@ -205,9 +276,9 @@ public abstract class ClientBase<ClientType> {
         setSession(new SessionInfo());
     }
 
-    protected void setSession(String sessionId, String server) {
+    protected void setSession(String sessionId, String server, GetUserInfoResult userInfo) {
 
-        setSession(new SessionInfo(sessionId, server));
+        setSession(new SessionInfo(sessionId, server, userInfo));
     }
 
     private void setSession(SessionInfo sess) {
@@ -216,6 +287,10 @@ public abstract class ClientBase<ClientType> {
 
     protected String getSessionId() throws NotLoggedInException {
         return getSession().getSessionId();
+    }
+    
+    public boolean logout() {
+    	return true;
     }
 
 }

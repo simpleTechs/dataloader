@@ -28,9 +28,10 @@ package com.salesforce.dataloader.action;
 
 import com.salesforce.dataloader.action.progress.ILoaderProgress;
 import com.salesforce.dataloader.action.visitor.IQueryVisitor;
-import com.salesforce.dataloader.action.visitor.PartnerQueryVisitor;
+import com.salesforce.dataloader.action.visitor.partner.PartnerQueryVisitor;
 import com.salesforce.dataloader.controller.Controller;
 import com.salesforce.dataloader.exception.DataAccessObjectInitializationException;
+import com.salesforce.dataloader.util.LoadRateCalculator;
 
 /**
  * @author Lexi Viripaeff
@@ -44,8 +45,8 @@ class PartnerExtractAction extends AbstractExtractAction {
     }
 
     @Override
-    protected IQueryVisitor createVisitor() {
-        return new PartnerQueryVisitor(getController(), getMonitor(), getDao(), getSuccessWriter(), getErrorWriter());
+    protected IQueryVisitor createVisitor(LoadRateCalculator rateCalculator, boolean isFirstJob) {
+        return new PartnerQueryVisitor(this, getController(), getMonitor(), getDao(), getSuccessWriter(), getErrorWriter());
     }
 
 }

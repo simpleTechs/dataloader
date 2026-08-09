@@ -174,7 +174,9 @@
 
 package com.salesforce.dataloader.util;
 
-public class Base64
+import com.salesforce.dataloader.ConfigTestBase;
+
+public class Base64 extends ConfigTestBase
 {
     
 /* ********  P U B L I C   F I E L D S  ******** */   
@@ -1386,7 +1388,7 @@ public class Base64
                     @Override
                     public Class<?> resolveClass(java.io.ObjectStreamClass streamClass)
                     throws java.io.IOException, ClassNotFoundException {
-                        Class c = Class.forName(streamClass.getName(), false, loader);
+                        Class<?> c = Class.forName(streamClass.getName(), false, loader);
                         if( c == null ){
                             return super.resolveClass(streamClass);
                         } else {

@@ -29,7 +29,7 @@ package com.salesforce.dataloader.process;
 import com.salesforce.dataloader.TestSetting;
 import com.salesforce.dataloader.TestVariant;
 import com.salesforce.dataloader.action.OperationInfo;
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.config.AppConfig;
 import com.sforce.soap.partner.QueryResult;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -70,15 +70,17 @@ public class DateProcessTest extends ProcessTestBase {
     public static Collection<Object[]> getTestParameters() {
         return Arrays.asList(
                 TestVariant.defaultSettings(),
-                TestVariant.forSettings(TestSetting.BULK_API_ENABLED));
+                TestVariant.forSettings(TestSetting.BULK_API_ENABLED),
+                TestVariant.forSettings(TestSetting.BULK_API_ENABLED, TestSetting.BULK_API_CACHE_DAO_UPLOAD_ENABLED)
+                );
 
     }
 
     @Override
     protected Map<String, String> getTestConfig() {
         Map<String, String> cfg = super.getTestConfig();
-        cfg.put(Config.TIMEZONE, "PDT");
-        cfg.put(Config.ENTITY, "Account");
+        cfg.put(AppConfig.PROP_TIMEZONE, "PDT");
+        cfg.put(AppConfig.PROP_ENTITY, "Account");
         return cfg;
     }
 
@@ -105,7 +107,7 @@ public class DateProcessTest extends ProcessTestBase {
 
     @Test
     public void testDateWithTimeZone() throws Exception {
-        runProcess(getTestConfig(OperationInfo.insert, false), 1);
+        runProcess(getTestConfig(OperationInfo.insert, false), 2);
         QueryResult qr = getBinding().query("select CustomDateTime__c from Account where AccountNumber__c='ACCT_0'");
         assertEquals(1, qr.getSize());
 

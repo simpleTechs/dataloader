@@ -25,9 +25,10 @@
  */
 package com.salesforce.dataloader.model;
 
+import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -41,30 +42,12 @@ import java.util.TreeMap;
  * methods and probably stop implementing Map interface. All Row behavior should be moved into this
  * class and not be spread in multiple class.
  */
-public class Row implements Map<String, Object> {
-
-    private static final int DEFAULT_COLUMN_COUNT = 16; // same as HashMap
+public class Row implements Map<String, Object>, RowInterface {
     private final Map<String, Object> internalMap;
+    private final Map<String, String> keyMap = new HashMap<String, String>();
 
     public Row() {
-        this(DEFAULT_COLUMN_COUNT);
-    }
-
-    public Row(int columnCount) {
-        internalMap = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-    }
-
-    public Row(Map<String, Object> internalMap) {
-        this(internalMap.size());
-        this.internalMap.putAll(internalMap);
-    }
-
-    public static Row emptyRow() {
-        return new Row(Collections.<String, Object>emptyMap());
-    }
-
-    public static Row singleEntryImmutableRow(String key, Object value) {
-        return new Row(Collections.singletonMap(key, value));
+        this.internalMap = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
     }
 
     @Override
@@ -79,7 +62,11 @@ public class Row implements Map<String, Object> {
 
     @Override
     public boolean containsKey(Object key) {
-        return internalMap.containsKey(key);
+        String realKey = this.keyMap.get(((String)key).toLowerCase());
+        if (realKey == null) {
+            return false;
+        }
+        return internalMap.containsKey(realKey);
     }
 
     @Override
@@ -89,26 +76,36 @@ public class Row implements Map<String, Object> {
 
     @Override
     public Object get(Object key) {
-        return internalMap.get(key);
+        String realKey = this.keyMap.get(((String)key).toLowerCase());
+        if (realKey == null) {
+            return null;
+        }
+        return internalMap.get(realKey);
     }
 
     @Override
     public Object put(String key, Object value) {
+        this.keyMap.put(key.toLowerCase(), key);
         return internalMap.put(key, value);
     }
 
     @Override
     public Object remove(Object key) {
+        this.keyMap.remove(((String)key).toLowerCase());
         return internalMap.remove(key);
     }
 
     @Override
     public void putAll(Map<? extends String, ?> m) {
+        for (String key : m.keySet()) {
+            this.keyMap.put(key.toLowerCase(), key);
+        }
         internalMap.putAll(m);
     }
 
     @Override
     public void clear() {
+        this.keyMap.clear();
         internalMap.clear();
     }
 
@@ -133,5 +130,19 @@ public class Row implements Map<String, Object> {
                 " size=" + internalMap.size() +
                 " columns=" + internalMap +
                 '}';
+    }
+    
+    public TableRow convertToTableRow(TableHeader header) {
+        TableRow trow = new TableRow(header);
+        for (String headerColName : header.getColumns()) {
+            trow.put(headerColName, this.get(headerColName));
+        }
+        return trow;
+    }
+
+    @Override
+    public List<String> getColumnNames() {
+        Set<String> fieldNameSet = this.keySet();
+        return new ArrayList<String>(fieldNameSet);
     }
 }

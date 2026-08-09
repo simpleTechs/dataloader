@@ -28,13 +28,20 @@ package com.salesforce.dataloader.mapping;
 import com.salesforce.dataloader.ConfigTestBase;
 import com.salesforce.dataloader.exception.MappingInitializationException;
 import com.salesforce.dataloader.model.Row;
+import com.salesforce.dataloader.model.TableHeader;
+import com.salesforce.dataloader.model.TableRow;
+import com.sforce.soap.partner.Field;
+import com.sforce.soap.partner.FieldType;
+
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 
@@ -49,6 +56,7 @@ import static org.junit.Assert.assertTrue;
  * @author Federico Recio
  * @since 8.0
  */
+@SuppressWarnings("unused")
 public class LoadMapperTest extends ConfigTestBase {
 
     private static final String[] SOURCE_NAMES = { "sourceOne", "sourceTwo", "sourceThree" };
@@ -56,11 +64,13 @@ public class LoadMapperTest extends ConfigTestBase {
     private static final String[] DEST_NAMES = { "destinationOne", "destinationTwo", "destinationThree" };
     private static final String DEST_CONSTANT_NAME = "destinationConstant";
     private static final String CONSTANT_VALUE = "constantValue123";
-    private Row sourceRow;
+    private TableRow sourceRow;
 
     @Before
     public void setUp() throws Exception {
-        sourceRow = new Row();
+        List<String> headerList = Arrays.asList(SOURCE_NAMES);
+        TableHeader tableHeader = new TableHeader(headerList);
+        sourceRow = new TableRow(tableHeader);
         // populate all the available values
         for (int i = 0; i < SOURCE_NAMES.length; i++) {
             sourceRow.put(SOURCE_NAMES[i], SOURCE_VALUES[i]);
@@ -146,7 +156,7 @@ public class LoadMapperTest extends ConfigTestBase {
         mappings.setProperty("", "Value6");
         LoadMapper mapper = new LoadMapper(null, null, null, null);
         mapper.putPropertyFileMappings(mappings);
-        Row result = mapper.mapData(Row.emptyRow());
+        TableRow result = mapper.mapData(TableRow.emptyRow(), true);
         assertEquals(constantValue, result.get("Name"));
         assertEquals(constantValue, result.get("field1__c"));
         assertEquals(constantValue, result.get("field2__c"));
@@ -188,11 +198,11 @@ public class LoadMapperTest extends ConfigTestBase {
         mapper.putPropertyFileMappings(mappings);
 
         //place a dao column -> sfdc field mapping
-        Row input = Row.singleEntryImmutableRow(csvFieldName, sfdcField);
+        TableRow input = TableRow.singleEntryImmutableRow(csvFieldName, sfdcField);
 
         //(src, dest).
         mapper.putMapping(csvFieldName, sfdcField);
-        Map<String, Object> result = mapper.mapData(input);
+        TableRow result = mapper.mapData(input, true);
 
         //verify that the old value holds
         assertEquals(constantValue, result.get(sfdcField));
@@ -225,9 +235,9 @@ public class LoadMapperTest extends ConfigTestBase {
         mappings.setProperty(wrappedConstantValue, sfdcField);
         mapper.putPropertyFileMappings(mappings);
 
-        Row input = Row.singleEntryImmutableRow(constantValue, sfdcField);
+        TableRow input = TableRow.singleEntryImmutableRow(constantValue, sfdcField);
 
-        Map<String, Object> result = mapper.mapData(input);
+        TableRow result = mapper.mapData(input, true);
 
         //verify that the old value holds
         assertEquals(constantValue, result.get(sfdcField));
@@ -238,11 +248,10 @@ public class LoadMapperTest extends ConfigTestBase {
         LoadMapper loadMapper = new LoadMapper(null, null, null, null);
         loadMapper.putMapping("SOURCE_COL", "");
 
-        Row inputData = Row.singleEntryImmutableRow("SOURCE_COL", "123");
+        TableRow inputData = TableRow.singleEntryImmutableRow("SOURCE_COL", "123");
 
-        Map<String, Object> result = loadMapper.mapData(inputData);
-
-        assertTrue("Empty destination column should have not been mapped", result.isEmpty());
+        TableRow result = loadMapper.mapData(inputData, true);
+        assertTrue("Empty destination column should have not been mapped", result.getNonEmptyCellsCount() == 0);
     }
 
     @Test
@@ -254,7 +263,7 @@ public class LoadMapperTest extends ConfigTestBase {
 
     @Test
     public void testVerifyMappingsAreValidUnknownColumn() throws Exception {
-        LoadMapper loadMapper = new LoadMapper(getController().getPartnerClient(), null, null, null);
+        LoadMapper loadMapper = new LoadMapper(getController().getSObjectMetaDataClient(), null, null, null);
         loadMapper.putMapping(SOURCE_NAMES[0], "non_existing_col_aa");
         try {
             loadMapper.verifyMappingsAreValid();
@@ -263,12 +272,29 @@ public class LoadMapperTest extends ConfigTestBase {
             // expected
         }
     }
-
+    
+    @Test
+    public void testCompositeMap() throws Exception {
+        Field[] fields = new Field[3];
+        for (int i = 0; i < 3; i++) {
+            fields[i] = new Field();
+            fields[i].setName(DEST_NAMES[i]);
+            fields[i].setType(FieldType.string);       
+        }
+        LoadMapper loadMapper = new LoadMapper(getController().getSObjectMetaDataClient(), null, fields, null);
+        loadMapper.putMapping(SOURCE_NAMES[0] + "," + SOURCE_NAMES[1],
+               DEST_NAMES[0] + "," + DEST_NAMES[1], true);
+        TableRow destValueRow = loadMapper.mapData(this.sourceRow, true);
+        String expectedDestValue = this.sourceRow.get(SOURCE_NAMES[0]) + ", " + this.sourceRow.get(SOURCE_NAMES[1]);
+        assertEquals(destValueRow.get(DEST_NAMES[0]), expectedDestValue);
+        assertEquals(destValueRow.get(DEST_NAMES[1]), expectedDestValue);
+    }
+   
     /**
      * Helper method to verify that the LoadMapper has mapped the specified columns to their correct respective field, along with any constants in the mapping file.
      */
     private void verifyMapping(LoadMapper mapper, String... destNames) {
-        Row destValueMap = mapper.mapData(this.sourceRow);
+        TableRow destValueMap = mapper.mapData(this.sourceRow, true);
         for (int i = 0; i < destNames.length; i++) {
             assertNotNull("Destination# " + i + "(" + destNames[i]
                     + ") should have a mapped value",

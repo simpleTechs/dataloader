@@ -26,9 +26,6 @@
 
 package com.salesforce.dataloader.action.progress;
 
-import org.apache.log4j.Logger;
-
-
 /**
  * This class implements the ILoaderProgress but does nothing with
  * the callbacks.
@@ -38,54 +35,93 @@ import org.apache.log4j.Logger;
  * @author Lexi Viripaeff
  * @since 6.0
  */
-public enum NihilistProgressAdapter implements ILoaderProgress {
-    INSTANCE;
 
-    public static NihilistProgressAdapter get() {
-        return INSTANCE;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+import org.apache.logging.log4j.Logger;
+
+import com.salesforce.dataloader.util.DLLogManager;
+
+public class NihilistProgressAdapter implements ILoaderProgress {
+    private String message;
+    private boolean success = false;
+    private int numRowsWithError = 0;
+    private int numberBatchesTotal = 0;
+    private final Logger logger = DLLogManager.getLogger(getClass());
+    private int workDone;
+    private int totalWork;
+    private final List<String> subTasksInOrder = new ArrayList<String>();
+
+
+    public NihilistProgressAdapter() {
+        // no op
     }
 
-    //logger
-    private final Logger logger = Logger.getLogger(getClass());
-
-    @Override
     public void beginTask(String name, int totalWork) {
-
+        this.totalWork = totalWork;
+    }
+    
+    public void doneError(String msg) {
+        success = false;
+        message = msg;
+        logger.error(msg);
     }
 
-    @Override
-    public void doneError(String msgs) {
-        logger.error(msgs);
-    }
-
-    @Override
     public void doneSuccess(String msg) {
+        success = true;
+        message = msg;
         logger.info(msg);
-
     }
 
-    @Override
     public void worked(int worked) {
-
+        this.workDone += worked;
     }
 
-    public void setTaskName(String name) {
-
-    }
-
-    @Override
     public void setSubTask(String name) {
+        this.subTasksInOrder.add(name);
         logger.info(name);
     }
 
-    @Override
+    public int getTotalWork() {
+        return this.totalWork;
+    }
+    
+    public int getNumWorked() {
+        return this.workDone;
+    }
+
+    public List<String> getSubTasks() {
+        return Collections.unmodifiableList(this.subTasksInOrder);
+    }
+
     public boolean isCanceled() {
         return false;
     }
 
-    @Override
     public void setNumberBatchesTotal(int numberBatchesTotal) {
-        // nothing
+        this.numberBatchesTotal = numberBatchesTotal;
     }
 
+    public boolean isSuccess() {
+        return this.success;
+    }
+
+    public String getMessage() {
+        return this.message;
+    }
+
+    public int getNumberBatchesTotal() {
+        return this.numberBatchesTotal;
+    }
+
+    public void setNumberRowsWithError(int rowsWithError) {
+        this.numRowsWithError = rowsWithError;
+        
+    }
+
+    public int getNumberRowsWithError() {
+        return this.numRowsWithError;
+    }
 }

@@ -26,11 +26,17 @@
 
 package com.salesforce.dataloader.action;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import com.salesforce.dataloader.action.progress.ILoaderProgress;
-import com.salesforce.dataloader.action.visitor.BulkLoadVisitor;
 import com.salesforce.dataloader.action.visitor.DAOLoadVisitor;
+import com.salesforce.dataloader.action.visitor.bulk.BulkLoadVisitor;
+import com.salesforce.dataloader.action.visitor.bulk.BulkV2LoadVisitor;
 import com.salesforce.dataloader.controller.Controller;
 import com.salesforce.dataloader.exception.DataAccessObjectInitializationException;
+import com.salesforce.dataloader.mapping.LoadMapper;
+import com.salesforce.dataloader.util.LoadRateCalculator;
 
 /**
  * @author Jesper Joergensen, Colin Jarvis
@@ -44,8 +50,33 @@ class BulkLoadAction extends AbstractLoadAction {
     }
 
     @Override
-    protected DAOLoadVisitor createVisitor() {
+    protected DAOLoadVisitor createVisitor(LoadRateCalculator rateCalculator, boolean isFirstJob) {
+        if (this.getConfig().isBulkV2APIEnabled()) {
+            return new BulkV2LoadVisitor(getController(), getMonitor(), getSuccessWriter(), getErrorWriter(), rateCalculator, isFirstJob);
+        }
         return new BulkLoadVisitor(getController(), getMonitor(), getSuccessWriter(), getErrorWriter());
+    }
+    
+    @Override
+    protected List<String> getStatusColumns() {
+        if (this.getConfig().isBulkV2APIEnabled()) {
+            // Success and error results in Bulk v2 job are downloaded separately.
+            //
+            // Success and error results in Bulk V2 upload operations contain all of the mapped columns
+            // in the order in which they were uploaded.
+            // Header of the error results file contains mapped DAO columns, not all DAO columns.
+            // Header of the success results file is saved as-is from the downloaded success file. It
+            // contains server-side field names along with a column answering "yes" or "no" to the header
+            // field "created?" and another column labeled "sf__id" listing id of the sobject.
+            LoadMapper mapper = (LoadMapper)this.getController().getMapper();
+            return mapper.getMappedDaoColumns();
+        } else {
+            // A single file that matches rows in uploaded batch contains success and error
+            // results in Bulk v1.
+            // Each row has 2 columns: "ID" and "STATUS".
+            // Header row of the success and error files can be generated using DAO's header row.
+            return super.getStatusColumns();
+        }
     }
 
 }

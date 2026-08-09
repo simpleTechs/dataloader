@@ -31,7 +31,11 @@ import java.io.File;
 import java.text.ParseException;
 import java.util.*;
 
-import org.apache.log4j.Logger;
+import org.apache.logging.log4j.Logger;
+
+import com.salesforce.dataloader.util.AppUtil;
+import com.salesforce.dataloader.util.DLLogManager;
+
 import org.junit.*;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -39,13 +43,14 @@ import org.junit.runners.Parameterized;
 import com.salesforce.dataloader.TestSetting;
 import com.salesforce.dataloader.TestVariant;
 import com.salesforce.dataloader.action.OperationInfo;
-import com.salesforce.dataloader.config.Config;
-import com.salesforce.dataloader.config.LastRun;
+import com.salesforce.dataloader.action.visitor.bulk.BulkApiVisitorUtil;
+import com.salesforce.dataloader.config.AppConfig;
+import com.salesforce.dataloader.config.LastRunProperties;
 import com.salesforce.dataloader.controller.Controller;
 import com.salesforce.dataloader.dao.database.DatabaseReader;
 import com.salesforce.dataloader.dao.database.DatabaseTestUtil;
 import com.salesforce.dataloader.exception.*;
-import com.salesforce.dataloader.model.Row;
+import com.salesforce.dataloader.model.TableRow;
 
 /**
  * Automated tests for dataloader database batch interface
@@ -56,7 +61,7 @@ import com.salesforce.dataloader.model.Row;
 @RunWith(Parameterized.class)
 public class DatabaseProcessTest extends ProcessTestBase {
 
-    private static final Logger logger = Logger.getLogger(DatabaseReader.class);
+    private static final Logger logger = DLLogManager.getLogger(DatabaseReader.class);
     private static final int NUM_ROWS = 1000;
     private static final int BATCH_SIZE = 100;
 
@@ -69,8 +74,11 @@ public class DatabaseProcessTest extends ProcessTestBase {
         return Arrays.asList(
                 TestVariant.defaultSettings(),
                 TestVariant.forSettings(TestSetting.BULK_API_ENABLED),
+                TestVariant.forSettings(TestSetting.BULK_API_ENABLED, TestSetting.BULK_API_CACHE_DAO_UPLOAD_ENABLED),
                 TestVariant.forSettings(TestSetting.BULK_API_ENABLED, TestSetting.BULK_API_ZIP_CONTENT_ENABLED),
-                TestVariant.forSettings(TestSetting.BULK_API_ENABLED, TestSetting.BULK_API_SERIAL_MODE_ENABLED));
+                TestVariant.forSettings(TestSetting.BULK_API_ENABLED, TestSetting.BULK_API_SERIAL_MODE_ENABLED),
+                TestVariant.forSettings(TestSetting.BULK_API_ENABLED, TestSetting.BULK_V2_API_ENABLED, TestSetting.BULK_API_CACHE_DAO_UPLOAD_ENABLED)
+                );
     }
 
     @Before
@@ -125,11 +133,37 @@ public class DatabaseProcessTest extends ProcessTestBase {
 	// This test happens to configure its own encryption file and encrypted password
         // so we need to remove the default test password from the config
         final Map<String, String> argMap = getTestConfig();
-        argMap.remove(Config.PASSWORD);
+        argMap.remove(AppConfig.PROP_PASSWORD);
         // insert
+        long usedMemoryBefore = 0;
+        Runtime runtime = Runtime.getRuntime();
+        if (isSettingEnabled(argMap, AppConfig.PROP_PROCESS_BULK_CACHE_DATA_FROM_DAO)
+            && isSettingEnabled(argMap, AppConfig.PROP_BULK_API_ENABLED)
+                || isSettingEnabled(argMap, AppConfig.PROP_BULKV2_API_ENABLED)) {
+            AppUtil.enableUsedHeapCapture(true);
+            System.gc();
+            usedMemoryBefore = runtime.totalMemory() - runtime.freeMemory();
+        }
         testUpsertAccountsDb(argMap, NUM_ROWS, true, false);
+        
+        if (isSettingEnabled(argMap, AppConfig.PROP_PROCESS_BULK_CACHE_DATA_FROM_DAO)
+                && isSettingEnabled(argMap, AppConfig.PROP_BULK_API_ENABLED)
+                    || isSettingEnabled(argMap, AppConfig.PROP_BULKV2_API_ENABLED)) {
+            System.gc();
+            long usedMemoryAfter = runtime.totalMemory() - runtime.freeMemory();
+            long usedMemoryDuring = AppUtil.getUsedHeap(BulkApiVisitorUtil.MEMORY_USE_TAG_CREATE_BULK_UPLOAD_);
+            long memoryIncreaseAfterUse = usedMemoryAfter - usedMemoryBefore;
+            long memoryIncreaseDuringUse = usedMemoryDuring - usedMemoryBefore;
+            assertTrue("Potential memory leak", memoryIncreaseAfterUse < 2000000);
+            if (isSettingEnabled(argMap, AppConfig.PROP_BULKV2_API_ENABLED)) {
+                // empirically the memory used during the operation is < 22Mb. If the memory use goes up by 
+                assertTrue("Potential memory use increase",  memoryIncreaseDuringUse < 25000000);
+            }
+            AppUtil.enableUsedHeapCapture(false);
+        }
         // update
         testUpsertAccountsDb(argMap, NUM_ROWS, false, false);
+        System.out.println("done");
     }
 
     private void testUpsertAccountsDb(Map<String, String> args, int numRows, boolean isInsert, boolean nullValues)
@@ -141,10 +175,10 @@ public class DatabaseProcessTest extends ProcessTestBase {
 
         // specify the name of the configured process and select appropriate database access type
         if (args == null) args = getTestConfig();
-        args.put(ProcessRunner.PROCESS_NAME, processName);
-        Config.DATE_FORMATTER.parse(startTime);
-        args.put(LastRun.LAST_RUN_DATE, startTime);
-        args.put(Config.OPERATION, OperationInfo.upsert.name());
+        args.put(AppConfig.PROP_PROCESS_NAME, processName);
+        AppConfig.DATE_FORMATTER.parse(startTime);
+        args.put(LastRunProperties.LAST_RUN_DATE, startTime);
+        args.put(AppConfig.PROP_OPERATION, OperationInfo.upsert.name());
 
         runUpsertProcess(args, isInsert ? numRows : 0, isInsert ? 0 : numRows);
     }
@@ -152,18 +186,18 @@ public class DatabaseProcessTest extends ProcessTestBase {
     @Test
     public void testInsertNullsDB() throws Exception {
         Map<String, String> args = getTestConfig();
-        if (isBulkAPIEnabled(args)) {
+        if (isBulkAPIEnabled(args) || isBulkV2APIEnabled(args)) {
             logger.info("testInsertNulls is disabled for bulk api");
             return;
         }
         // TODO: we need to get the accounts from sfdc and check that field values were updated correctly
         // create some rows with non-null values in them
-        args.put(Config.INSERT_NULLS, Boolean.toString(false));
+        args.put(AppConfig.PROP_INSERT_NULLS, Boolean.toString(false));
         testUpsertAccountsDb(args, 10, true, false);
         // update the rows with some null values, but with insert nulls disabled
         testUpsertAccountsDb(args, 10, false, true);
         // update the rows with some null values, but with insert nulls enabled
-        args.put(Config.INSERT_NULLS, Boolean.toString(true));
+        args.put(AppConfig.PROP_INSERT_NULLS, Boolean.toString(true));
         testUpsertAccountsDb(args, 10, false, true);
     }
 
@@ -173,15 +207,15 @@ public class DatabaseProcessTest extends ProcessTestBase {
         // specify the name of the configured process and select appropriate database access type
         OperationInfo op = isInsert ? OperationInfo.insert : OperationInfo.update;
         Map<String, String> argMap = getTestConfig();
-        argMap.put(Config.OPERATION, OperationInfo.extract.name());
-        argMap.put(ProcessRunner.PROCESS_NAME, processName);
-        argMap.put(Config.DAO_NAME, op.name() + "Account");
-        argMap.put(Config.OUTPUT_SUCCESS, new File(getTestStatusDir(), baseName + op.name() + "Success.csv")
+        argMap.put(AppConfig.PROP_OPERATION, OperationInfo.extract.name());
+        argMap.put(AppConfig.PROP_PROCESS_NAME, processName);
+        argMap.put(AppConfig.PROP_DAO_NAME, op.name() + "Account");
+        argMap.put(AppConfig.PROP_OUTPUT_SUCCESS, new File(getTestStatusDir(), baseName + op.name() + "Success.csv")
         .getAbsolutePath());
-        argMap.put(Config.OUTPUT_ERROR, new File(getTestStatusDir(), baseName + op.name() + "Error.csv")
+        argMap.put(AppConfig.PROP_OUTPUT_ERROR, new File(getTestStatusDir(), baseName + op.name() + "Error.csv")
         .getAbsolutePath());
-        argMap.put(Config.ENABLE_EXTRACT_STATUS_OUTPUT, Config.TRUE);
-        argMap.put(Config.DAO_WRITE_BATCH_SIZE, String.valueOf(BATCH_SIZE));
+        argMap.put(AppConfig.PROP_ENABLE_EXTRACT_STATUS_OUTPUT, AppConfig.TRUE);
+        argMap.put(AppConfig.PROP_DAO_WRITE_BATCH_SIZE, String.valueOf(BATCH_SIZE));
 
         Date startTime = new Date();
 
@@ -197,17 +231,17 @@ public class DatabaseProcessTest extends ProcessTestBase {
         DatabaseReader reader = null;
         logger.info("Verifying database success for database configuration: " + dbConfigName);
         try {
-            reader = new DatabaseReader(theController.getConfig(), dbConfigName);
+            reader = new DatabaseReader(theController.getAppConfig(), dbConfigName);
             reader.open();
-            int readBatchSize = theController.getConfig().getInt(Config.DAO_READ_BATCH_SIZE);
-            List<Row> successRows = reader.readRowList(readBatchSize);
+            int readBatchSize = theController.getAppConfig().getInt(AppConfig.PROP_DAO_READ_BATCH_SIZE);
+            List<TableRow> successRows = reader.readTableRowList(readBatchSize);
             int rowsProcessed = 0;
             assertNotNull("Error reading " + readBatchSize + " rows", successRows);
             while(successRows.size() > 0) {
                 rowsProcessed += successRows.size();
                 logger.info("Verifying database success for next " + successRows.size() + " of total " + rowsProcessed + " rows");
                 assertTrue("No updated rows have been found in the database.", successRows.size() > 0);
-                successRows = reader.readRowList(readBatchSize);
+                successRows = reader.readTableRowList(readBatchSize);
             }
             assertEquals(expectedSuccesses, rowsProcessed);
         } catch (DataAccessObjectInitializationException e) {

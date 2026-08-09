@@ -25,8 +25,10 @@
  */
 package com.salesforce.dataloader.ui.extraction;
 
-import org.eclipse.jface.resource.ImageDescriptor;
-import org.eclipse.jface.wizard.WizardPage;
+import com.salesforce.dataloader.config.AppConfig;
+import com.salesforce.dataloader.controller.Controller;
+import com.salesforce.dataloader.ui.Labels;
+import com.salesforce.dataloader.ui.OperationPage;
 
 /**
  * Class for the common code in the extraction wizard pages
@@ -34,19 +36,25 @@ import org.eclipse.jface.wizard.WizardPage;
  * @author Alex Warshavsky
  * @since 8.0
  */
-public abstract class ExtractionPage extends WizardPage {
+public abstract class ExtractionPage extends OperationPage {
 
-    /**
-     * @param pageName
-     * @param title
-     * @param titleImage
-     */
-    protected ExtractionPage(String pageName, String title, ImageDescriptor titleImage) {
-        super(pageName, title, titleImage);
+    protected ExtractionPage(String name, Controller controller) {
+        super(name, controller);
+
     }
 
-    /**
-     * finishing step for this page
-     */
-    public abstract boolean finishPage();
+    @Override
+    protected String getConfigInfo() {
+        return getConfigInfo(controller.getAppConfig());
+    }
+        
+    public static String getConfigInfo(AppConfig appConfig) {
+        if (appConfig.isBulkAPIEnabled() || appConfig.isBulkV2APIEnabled()) {
+            return "";
+        }
+        // Batch size settings are applicable only for SOAP API
+        return  Labels.getString("ExtractionInputDialog.exportBatchSize")
+                + " "
+                + appConfig.getString(AppConfig.PROP_EXPORT_BATCH_SIZE);
+    }
 }

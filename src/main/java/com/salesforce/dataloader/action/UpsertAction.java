@@ -28,9 +28,10 @@
 package com.salesforce.dataloader.action;
 
 import com.salesforce.dataloader.action.progress.ILoaderProgress;
-import com.salesforce.dataloader.action.visitor.UpsertVisitor;
+import com.salesforce.dataloader.action.visitor.partner.PartnerUpsertVisitor;
 import com.salesforce.dataloader.controller.Controller;
 import com.salesforce.dataloader.exception.DataAccessObjectException;
+import com.salesforce.dataloader.util.LoadRateCalculator;
 
 /**
  * @author Alex Warshavsky
@@ -43,8 +44,8 @@ class UpsertAction extends AbstractLoadAction {
     }
 
     @Override
-    protected UpsertVisitor createVisitor() {
-        return new UpsertVisitor(getController(), getMonitor(), getSuccessWriter(), getErrorWriter());
+    protected PartnerUpsertVisitor createVisitor(LoadRateCalculator rateCalculator, boolean isFirstJob) {
+        return new PartnerUpsertVisitor(getController(), getMonitor(), getSuccessWriter(), getErrorWriter());
     }
 
 }

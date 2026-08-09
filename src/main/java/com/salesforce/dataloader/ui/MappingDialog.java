@@ -29,35 +29,52 @@ package com.salesforce.dataloader.ui;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.*;
+import java.security.GeneralSecurityException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Properties;
 
-import org.apache.log4j.Logger;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.TableViewer;
+import org.eclipse.jface.viewers.Viewer;
+import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
-import org.eclipse.swt.dnd.*;
-import org.eclipse.swt.events.*;
+import org.eclipse.swt.dnd.DND;
+import org.eclipse.swt.dnd.TextTransfer;
+import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.swt.events.KeyEvent;
+import org.eclipse.swt.events.KeyListener;
+import org.eclipse.swt.events.SelectionAdapter;
+import org.eclipse.swt.events.SelectionEvent;
+import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
-import org.eclipse.swt.widgets.*;
+import org.eclipse.swt.widgets.Button;
+import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.FileDialog;
+import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Table;
+import org.eclipse.swt.widgets.TableColumn;
+import org.eclipse.swt.widgets.Text;
 
-import com.salesforce.dataloader.action.OperationInfo;
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.controller.Controller;
 import com.salesforce.dataloader.mapping.LoadMapper;
 import com.salesforce.dataloader.ui.mapping.*;
+import com.salesforce.dataloader.util.AppUtil;
 import com.sforce.soap.partner.Field;
 
 /**
  * This class creates the mapping dialog
  */
-public class MappingDialog extends Dialog {
-    private String input;
-
-    private Controller controller;
-    private final Logger logger = Logger.getLogger(MappingDialog.class);
-
+public class MappingDialog extends WizardDialog {
     //the two tableViewers
     private TableViewer sforceTblViewer;
     private TableViewer mappingTblViewer;
@@ -70,28 +87,27 @@ public class MappingDialog extends Dialog {
     public static final int MAPPING_DAO = 0;
     public static final int MAPPING_SFORCE = 1;
 
-    //the current list of fields
-    private Field[] fields;
+    //unmapped sobject fields of the selected sobject
+    private Field[] unmappedSobjectFields;
 
-    //all the fields
-    private Field[] allFields;
+    //all sobject fields of the selected sobject
+    private final Field[] allSobjectFields;
 
     //restore for the old values on cancel
     private Properties restore;
 
     private LoadMapper mapper;
-    private Field[] sforceFieldInfo;
     private MappingPage page;
     private HashSet<String> mappedFields;
-
-    public void setSforceFieldInfo(Field[] sforceFieldInfo) {
-        this.sforceFieldInfo = sforceFieldInfo;
+    private Shell parentShell;
+    private Shell dialogShell;
+    private Text sforceFieldsSearch;
+    private boolean dragNDropCancelled = false;
+    
+    public void setUnmappedSobjectFields(Field[] fields) {
+        this.unmappedSobjectFields = fields;
     }
-
-    public void setFields(Field[] newFields) {
-        this.fields = newFields;
-    }
-
+    
     public void setMapper(LoadMapper mapper) {
         this.mapper = mapper;
         this.restore = new Properties();
@@ -114,67 +130,14 @@ public class MappingDialog extends Dialog {
      */
     public MappingDialog(Shell parent, Controller controller, MappingPage page) {
         // Pass the default styles here
-        this(parent, SWT.DIALOG_TRIM | SWT.APPLICATION_MODAL);
-        this.controller = controller;
+        super(parent, controller);
         this.page = page;
-
+        this.parentShell = parent;
+        this.allSobjectFields = page.getMappableSalesforceFields();
     }
-
-    /**
-     * InputDialog constructor
-     *
-     * @param parent
-     *            the parent
-     * @param style
-     *            the style
-     */
-    public MappingDialog(Shell parent, int style) {
-        // Let users override the default styles
-        super(parent, style);
-
-        setText(Labels.getString("MappingDialog.title")); //$NON-NLS-1$
-    }
-
-    /**
-     * Gets the input
-     *
-     * @return String
-     */
-    public String getInput() {
-        return input;
-    }
-
-    /**
-     * Sets the input
-     *
-     * @param input
-     *            the new input
-     */
-    public void setInput(String input) {
-        this.input = input;
-    }
-
-    /**
-     * Opens the dialog and returns the input
-     *
-     * @return String
-     */
-    public String open() {
-        // Create the dialog window
-        Shell shell = new Shell(getParent(), getStyle() | SWT.RESIZE);
-        shell.setText(getText());
-        shell.setSize(600, 600);
-        createContents(shell);
-        shell.pack();
-        shell.open();
-        Display display = getParent().getDisplay();
-        while (!shell.isDisposed()) {
-            if (!display.readAndDispatch()) {
-                display.sleep();
-            }
-        }
-        // Return the entered value, or null
-        return input;
+    
+    public Shell getParent() {
+        return this.parentShell;
     }
 
     /**
@@ -183,7 +146,8 @@ public class MappingDialog extends Dialog {
      * @param shell
      *            the dialog window
      */
-    private void createContents(final Shell shell) {
+    protected void createContents(final Shell shell) {
+        this.dialogShell = shell;
         shell.setImage(UIUtils.getImageRegistry().get("sfdc_icon")); //$NON-NLS-1$
         shell.setLayout(new GridLayout(1, false));
         GridData data;
@@ -191,7 +155,7 @@ public class MappingDialog extends Dialog {
         //top label
         Label label = new Label(shell, SWT.NONE);
         label.setText(Labels.getString("MappingDialog.matchlabel")); //$NON-NLS-1$
-
+        
         //buttons
         Composite comp = new Composite(shell, SWT.NONE);
         comp.setLayout(new GridLayout(2, false));
@@ -216,11 +180,19 @@ public class MappingDialog extends Dialog {
                 autoMatchFields();
             }
         });
+        
+        sforceFieldsSearch = new Text(shell, SWT.SEARCH | SWT.ICON_CANCEL | SWT.ICON_SEARCH);
+        sforceFieldsSearch.setLayoutData(new GridData(GridData.FILL_HORIZONTAL));
+        sforceFieldsSearch.addListener(SWT.KeyUp, new Listener() {
+            public void handleEvent(Event e) {
+                sforceTblViewer.refresh();
+            }
+        });
 
         ///////////////////////////////////////////////
         //InitializeSforceViewer
         ///////////////////////////////////////////////
-        initializeSforceViewer(shell);
+        initializeSforceViewer(shell, sforceFieldsSearch);
 
         Label sep1 = new Label(shell, SWT.HORIZONTAL | SWT.SEPARATOR);
         sep1.setLayoutData(new GridData(GridData.FILL_HORIZONTAL));
@@ -258,9 +230,8 @@ public class MappingDialog extends Dialog {
             @Override
             public void widgetSelected(SelectionEvent event) {
                 //refresh the mapping page view
-                page.updateMapping();
-                page.packMappingColumns();
-
+                page.updateMappingTblViewer();
+                page.setPageComplete();
                 shell.close();
             }
         });
@@ -274,9 +245,6 @@ public class MappingDialog extends Dialog {
             @Override
             public void widgetSelected(SelectionEvent event) {
                 FileDialog dlg = new FileDialog(shell, SWT.SAVE);
-                Config config = controller.getConfig();
-                dlg.setFileName(config.getString(Config.MAPPING_FILE));
-                dlg.setFilterPath(config.getString(Config.MAPPING_FILE));
                 dlg.setFilterExtensions(new String[] { "*.sdl" });
                 String filename = dlg.open();
                 boolean cancel = false;
@@ -299,17 +267,18 @@ public class MappingDialog extends Dialog {
                 }
 
                 if (!cancel) {
-                    config.setValue(Config.MAPPING_FILE, filename);
                     try {
                         mapper.save(filename);
                     } catch (IOException e1) {
                         logger.error(Labels.getString("MappingDialog.errorSave"), e1); //$NON-NLS-1$
                     }
+                    
                 }
 
                 //refresh the mapping page view
-                page.updateMapping();
-                page.packMappingColumns();
+                page.updateMappingTblViewer();
+                page.setPageComplete();
+                shell.close();
             }
         });
 
@@ -325,7 +294,7 @@ public class MappingDialog extends Dialog {
             public void widgetSelected(SelectionEvent event) {
 
                 //revert the Mapping back
-                mapper.clearMap();
+                mapper.clearMappings();
                 mapper.putPropertyFileMappings(restore);
 
                 shell.close();
@@ -337,6 +306,14 @@ public class MappingDialog extends Dialog {
         // to dismiss
         shell.setDefaultButton(ok);
     }
+    
+    public void setIsDragNDropCancelled(boolean cancelled) {
+        this.dragNDropCancelled = cancelled;
+    }
+    
+    public boolean isDragActionCancelled() {
+        return this.dragNDropCancelled;
+    }
 
     private void initializeMappingViewer(Shell shell) {
         GridData data;
@@ -344,20 +321,24 @@ public class MappingDialog extends Dialog {
         mappingTblViewer = new TableViewer(shell, SWT.FULL_SELECTION);
         mappingTblViewer.setContentProvider(new MappingContentProvider());
         mappingTblViewer.setLabelProvider(new MappingLabelProvider());
-        mappingTblViewer.setSorter(new MappingViewerSorter());
+
+        data = new GridData(GridData.FILL_BOTH);
 
         //add drop support
         int ops = DND.DROP_MOVE;
         Transfer[] transfers = new Transfer[] { TextTransfer.getInstance() };
-        mappingTblViewer.addDropSupport(ops, transfers, new MappingDropAdapter(mappingTblViewer, this));
+        mappingTblViewer.addDropSupport(ops, transfers, new MappingDropAdapter(mappingTblViewer, this, getController()));
 
         //add drag support
         mappingTblViewer.addDragSupport(ops, transfers, new SforceDragListener(mappingTblViewer, this));
 
         //  Set up the sforce table
         Table mappingTable = mappingTblViewer.getTable();
+        Rectangle shellBounds = getPersistedDialogBounds();
         data = new GridData(GridData.FILL_BOTH);
-        data.heightHint = 200;
+        data.widthHint = shellBounds.width;
+        data.heightHint = shellBounds.height / 3;
+       // data.heightHint = shellBounds.height;
         mappingTable.setLayoutData(data);
 
         //add key listener to process deletes
@@ -365,21 +346,18 @@ public class MappingDialog extends Dialog {
             @Override
             public void keyPressed(KeyEvent event) {
                 //\u007f is delete
-                if (event.character == '\u007f') {
+                if (event.character == '\u007f' || event.character == '\b') {
                     IStructuredSelection selection = (IStructuredSelection)mappingTblViewer.getSelection();
-                    for (Iterator it = selection.iterator(); it.hasNext();) {
+                    for (Iterator<?> it = selection.iterator(); it.hasNext();) {
                         @SuppressWarnings("unchecked")
                         Map.Entry<String, String> elem = (Entry<String, String>)it.next();
                         String oldSforce = elem.getValue();
                         if (oldSforce != null && oldSforce.length() > 0) {
                             //clear the sforce
-                            replenishField(oldSforce);
-
+                            replenishMappedSforceFields(oldSforce);
                             elem.setValue("");
                             mapper.removeMapping(elem.getKey());
-
                             packMappingColumns();
-                            mappingTblViewer.refresh();
                         }
                     }
                 }
@@ -389,24 +367,32 @@ public class MappingDialog extends Dialog {
             public void keyReleased(KeyEvent event) {}
         });
 
-        // Add the first column - name
-        TableColumn tc = new TableColumn(mappingTable, SWT.LEFT);
-        tc.setText(Labels.getString("MappingDialog.fileColumn")); //$NON-NLS-1$
-        tc.addSelectionListener(new SelectionAdapter() {
+        // Add the first column - column header in CSV file
+        TableColumn csvFieldsCol = new TableColumn(mappingTable, SWT.LEFT);
+        String headerStr = Labels.getString("MappingDialog.fileColumn");
+        csvFieldsCol.setText(headerStr); //$NON-NLS-1$
+        csvFieldsCol.addSelectionListener(new SelectionAdapter() {
             @Override
             public void widgetSelected(SelectionEvent event) {
-                ((MappingViewerSorter)mappingTblViewer.getSorter()).doSort(MAPPING_DAO);
+                if (mappingTblViewer.getComparator() == null) {
+                    mappingTblViewer.setComparator(new MappingViewerComparator());
+                }
+                ((MappingViewerComparator)mappingTblViewer.getComparator()).doSort(MAPPING_DAO);
                 mappingTblViewer.refresh();
             }
         });
 
-        //Add the second column - label
-        tc = new TableColumn(mappingTable, SWT.LEFT);
-        tc.setText(Labels.getString("MappingDialog.fileName")); //$NON-NLS-1$
-        tc.addSelectionListener(new SelectionAdapter() {
+        //Add the second column - name of Salesforce object field
+        TableColumn sforceFieldNamesCol = new TableColumn(mappingTable, SWT.LEFT);
+        headerStr = Labels.getString("MappingDialog.sforceFieldName");
+        sforceFieldNamesCol.setText(headerStr); //$NON-NLS-1$
+        sforceFieldNamesCol.addSelectionListener(new SelectionAdapter() {
             @Override
             public void widgetSelected(SelectionEvent event) {
-                ((MappingViewerSorter)mappingTblViewer.getSorter()).doSort(MAPPING_SFORCE);
+                if (mappingTblViewer.getComparator() == null) {
+                    mappingTblViewer.setComparator(new MappingViewerComparator());
+                }
+                ((MappingViewerComparator)mappingTblViewer.getComparator()).doSort(MAPPING_SFORCE);
                 mappingTblViewer.refresh();
             }
         });
@@ -424,17 +410,17 @@ public class MappingDialog extends Dialog {
         if (mappingTable.getItemCount() > 0) {
             mappingTable.showItem(mappingTable.getItem(0));
         }
-
     }
 
-    private void initializeSforceViewer(Shell shell) {
+    private void initializeSforceViewer(Shell shell, Text sforceFieldsSearch) {
         GridData data;
 
         //sforce field table viewer
         sforceTblViewer = new TableViewer(shell, SWT.FULL_SELECTION);
         sforceTblViewer.setContentProvider(new SforceContentProvider());
-        sforceTblViewer.setLabelProvider(new SforceLabelProvider());
-        sforceTblViewer.setSorter(new SforceViewerSorter());
+        sforceTblViewer.setLabelProvider(new SforceLabelProvider(this.getController()));
+        sforceTblViewer.setComparator(new SforceViewerComparator());
+        sforceTblViewer.addFilter(new SforceFieldsFilter(sforceFieldsSearch));
 
         //add drag support
         int ops = DND.DROP_MOVE;
@@ -447,38 +433,40 @@ public class MappingDialog extends Dialog {
         // Set up the sforce table
         Table sforceTable = sforceTblViewer.getTable();
         data = new GridData(GridData.FILL_BOTH);
-        data.heightHint = 150;
+        Rectangle shellBounds = getPersistedDialogBounds();
+        data.widthHint = shellBounds.width;
+        data.heightHint = shellBounds.height / 3;
         sforceTable.setLayoutData(data);
 
         // Add the first column - name
         TableColumn tc = new TableColumn(sforceTable, SWT.LEFT);
-        tc.setText(Labels.getString("MappingDialog.sforceName")); //$NON-NLS-1$
+        tc.setText(Labels.getString("MappingDialog.sforceFieldName")); //$NON-NLS-1$
         tc.addSelectionListener(new SelectionAdapter() {
             @Override
             public void widgetSelected(SelectionEvent event) {
-                ((SforceViewerSorter)sforceTblViewer.getSorter()).doSort(FIELD_NAME);
+                ((SforceViewerComparator)sforceTblViewer.getComparator()).doSort(FIELD_NAME);
                 sforceTblViewer.refresh();
             }
         });
 
         //Add the second column - label
         tc = new TableColumn(sforceTable, SWT.LEFT);
-        tc.setText(Labels.getString("MappingDialog.sforceLabel")); //$NON-NLS-1$
+        tc.setText(Labels.getString("MappingDialog.sforceFieldLabel")); //$NON-NLS-1$
         tc.addSelectionListener(new SelectionAdapter() {
             @Override
             public void widgetSelected(SelectionEvent event) {
-                ((SforceViewerSorter)sforceTblViewer.getSorter()).doSort(FIELD_LABEL);
+                ((SforceViewerComparator)sforceTblViewer.getComparator()).doSort(FIELD_LABEL);
                 sforceTblViewer.refresh();
             }
         });
 
         //  Add the third column - type
-        tc = new TableColumn(sforceTable, SWT.RIGHT);
-        tc.setText(Labels.getString("MappingDialog.sforceType")); //$NON-NLS-1$
+        tc = new TableColumn(sforceTable, SWT.LEFT);
+        tc.setText(Labels.getString("MappingDialog.sforceFieldType")); //$NON-NLS-1$
         tc.addSelectionListener(new SelectionAdapter() {
             @Override
             public void widgetSelected(SelectionEvent event) {
-                ((SforceViewerSorter)sforceTblViewer.getSorter()).doSort(FIELD_TYPE);
+                ((SforceViewerComparator)sforceTblViewer.getComparator()).doSort(FIELD_TYPE);
                 sforceTblViewer.refresh();
             }
         });
@@ -499,51 +487,23 @@ public class MappingDialog extends Dialog {
         }
 
     }
+    
+    protected void setShellBounds(Shell dialogShell) {
+        Rectangle shellBounds = getPersistedDialogBounds();
+        dialogShell.setBounds(shellBounds);
+        dialogShell.addListener(SWT.Resize, this::persistedDialogShellBoundsChanged);
+        packMappingColumns();
+        packSforceColumns();
+    }
 
     private void autoMatchFields() {
-
-        LinkedList<Field> fieldList = new LinkedList<Field>(Arrays.asList(fields));
-        //first match on name, then label
-        ListIterator<Field> iterator = fieldList.listIterator();
-        Field field;
-        while (iterator.hasNext()) {
-            field = iterator.next();
-            String fieldName = field.getName();
-            String fieldLabel = field.getLabel();
-            String mappingSource = null;
-
-            // field is already mapped
-            // TODO: check with lexi if this is intended use of automatch
-            if(mappedFields.contains(fieldName)) {
-                continue;
-            }
-
-            if (mapper.hasDaoColumn(fieldName)) {
-                mappingSource = fieldName;
-            } else if (mapper.hasDaoColumn(fieldLabel)) {
-                mappingSource = fieldLabel;
-            }
-
-            if(mappingSource != null) {
-                // don't overwrite the fields that already have been mapped
-                String oldFieldName = mapper.getMapping(mappingSource);
-                if(oldFieldName == null || oldFieldName.length() == 0) {
-                    mapper.putMapping(mappingSource, fieldName);
-                }
-                iterator.remove();
-            }
-        }
-
-        fields = fieldList.toArray(new Field[fieldList.size()]);
-
-        sforceTblViewer.setInput(fields);
-        sforceTblViewer.refresh();
-        mappingTblViewer.refresh();
-
+        this.unmappedSobjectFields = this.page.autoMatchFieldsAndGetUnmappedFields();
+        sforceTblViewer.setInput(this.unmappedSobjectFields);
+        updateMapping();
         //pack the columns
         packMappingColumns();
         packSforceColumns();
-
+        
     }
 
     public void packMappingColumns() {
@@ -551,8 +511,11 @@ public class MappingDialog extends Dialog {
         //  Pack the columns
         for (int i = 0, n = mappingTable.getColumnCount(); i < n; i++) {
             mappingTable.getColumn(i).pack();
-
         }
+        mappingTblViewer.setInput(this.mapper);
+        mappingTblViewer.refresh();
+        mappingTable.redraw();
+        UIUtils.setTableColWidth(mappingTable);
     }
 
     private void packSforceColumns() {
@@ -561,29 +524,30 @@ public class MappingDialog extends Dialog {
         for (int i = 0, n = sforceTable.getColumnCount(); i < n; i++) {
             sforceTable.getColumn(i).pack();
         }
+        sforceTblViewer.refresh();
+        sforceTable.redraw();
+        UIUtils.setTableColWidth(sforceTable);
+
     }
 
-    public void replenishField(String fieldName) {
-        //find the Field object to add to the current list.
-        Field field;
-        for (int i = 0; i < allFields.length; i++) {
-            field = allFields[i];
-            if (field.getName().equals(fieldName)) {
-                ArrayList<Field> fieldArray = new ArrayList<Field>(Arrays.asList(fields));
-
-                //else add the field
-                fieldArray.add(field);
-                fields = fieldArray.toArray(new Field[fieldArray.size()]);
-
-                //then refresh
-                sforceTblViewer.setInput(fields);
-                sforceTblViewer.refresh();
-
-                packSforceColumns();
-
-                return;
+    public void replenishMappedSforceFields(String fieldNameList) {
+        String[] fieldNameListArray = fieldNameList.split(AppUtil.COMMA);
+        ArrayList<Field> fieldList = new ArrayList<Field>(Arrays.asList(this.unmappedSobjectFields));
+        for (String fieldNameToReplenish : fieldNameListArray) {
+            fieldNameToReplenish = fieldNameToReplenish.strip();
+            //find the Field object to add to the current list.
+            Field field;
+            for (int i = 0; i < allSobjectFields.length; i++) {
+                field = allSobjectFields[i];
+                if (field.getName().equals(fieldNameToReplenish)) {
+                    fieldList.add(field);
+                }
             }
         }
+        this.unmappedSobjectFields = fieldList.toArray(new Field[fieldList.size()]);
+        sforceTblViewer.setInput(this.unmappedSobjectFields);
+        packSforceColumns();
+        return;
     }
 
     /**
@@ -591,75 +555,42 @@ public class MappingDialog extends Dialog {
      */
     private void updateSforce() {
 
-        ArrayList<Field> mappableFieldList = new ArrayList<Field>();
-        ArrayList<Field> allFieldList = new ArrayList<Field>();
-        Field field;
-        OperationInfo operation = controller.getConfig().getOperationInfo();
-        for (int i = 0; i < sforceFieldInfo.length; i++) {
-
-            field = sforceFieldInfo[i];
-            boolean isMappable = false;
-            switch (operation) {
-            case insert:
-                if (field.isCreateable()) {
-                    isMappable = true;
-                }
-                break;
-            case delete:
-            case hard_delete:
-                if (field.getType().toString().toLowerCase().equals("id")) {
-                    isMappable = true;
-                }
-                break;
-            case upsert:
-                if (field.isUpdateable() || field.isCreateable()
-                        || field.getType().toString().toLowerCase().equals("id")) {
-                    isMappable = true;
-                }
-                break;
-            case update:
-                if (field.isUpdateable() || field.getType().toString().toLowerCase().equals("id")) {
-                    isMappable = true;
-                }
-                break;
-            default:
-                throw new UnsupportedOperationException();
-            }
-            // only add the field to mappings if it's not already used in mapping
-            if(isMappable) {
-                if(!mappedFields.contains(field.getName())) {
-                    mappableFieldList.add(field);
-                }
-                // this list is for all fields in case map is reset
-                allFieldList.add(field);
+        ArrayList<Field> unmappedSobjectFieldList = new ArrayList<Field>();
+        AppConfig appConfig = getController().getAppConfig();
+        String extIdField = appConfig.getString(AppConfig.PROP_IDLOOKUP_FIELD);
+        if(extIdField == null) {
+            extIdField = "";
+        } else {
+            extIdField = extIdField.toLowerCase();
+        }
+        for (Field sobjectField : allSobjectFields) {
+            if(!mappedFields.contains(sobjectField.getName())) {
+                unmappedSobjectFieldList.add(sobjectField);
             }
         }
-
-        fields = mappableFieldList.toArray(new Field[mappableFieldList.size()]);
-        allFields = allFieldList.toArray(new Field[allFieldList.size()]);
+        this.unmappedSobjectFields = unmappedSobjectFieldList.toArray(new Field[unmappedSobjectFieldList.size()]);
 
         // Set the table viewer's input
-        sforceTblViewer.setInput(fields);
+        sforceTblViewer.setInput(this.unmappedSobjectFields);
     }
 
     /**
      * Clears the mapping
      */
     private void clearMapping() {
-        mapper.clearMap();
-        // restore the fields that were mapped before
+        mapper.clearMappings();
+        // restore the fields in sforceTblViewer that were mapped before
         for(String fieldName : mappedFields) {
-            replenishField(fieldName);
+            replenishMappedSforceFields(fieldName);
         }
         mappedFields.clear();
-        mappingTblViewer.refresh();
+        packMappingColumns();
     }
 
     /**
      * Responsible for updating the mapping model
      */
     private void updateMapping() {
-
         // Set the table viewer's input
         mappingTblViewer.setInput(mapper);
     }
@@ -667,5 +598,66 @@ public class MappingDialog extends Dialog {
     public LoadMapper getMapper() {
         return this.mapper;
     }
+    
+    private void persistedDialogShellBoundsChanged(Event event) {
+        switch (event.type) {
+            case SWT.Resize:
+            case SWT.Move:
+                if (!this.dialogShell.isVisible()) {
+                    return;
+                }
+                AppConfig appConfig = this.getController().getAppConfig();
+                Rectangle shellBounds = this.dialogShell.getBounds();
+                appConfig.setValue(AppConfig.DIALOG_BOUNDS_PREFIX + this.getClass().getSimpleName() + AppConfig.DIALOG_WIDTH_SUFFIX, shellBounds.width);
+                appConfig.setValue(AppConfig.DIALOG_BOUNDS_PREFIX + this.getClass().getSimpleName() + AppConfig.DIALOG_HEIGHT_SUFFIX, shellBounds.height);
+                try {
+                    appConfig.save();
+                } catch (GeneralSecurityException | IOException e) {
+                    // no-op
+                    e.printStackTrace();
+                }
+                break;
+        }
+    }
+}
 
+/**
+* This class filters the Saleforce fields list
+*/
+
+class SforceFieldsFilter extends ViewerFilter {
+   private Text searchText;
+   public SforceFieldsFilter(Text search) {
+       super();
+       this.searchText = search;
+   }
+   /**
+    * Returns whether the specified element passes this filter
+    *
+    * @param arg0
+    *            the viewer
+    * @param arg1
+    *            the parent element
+    * @param arg2
+    *            the element
+    * @return boolean
+    */
+   @Override
+   public boolean select(Viewer arg0, Object arg1, Object arg2) {
+
+       Field selectedField = (Field)arg2;
+       String fieldName = selectedField.getName();
+       String fieldLabel = selectedField.getLabel();
+       String searchText = this.searchText.getText();
+       if (searchText != null && !searchText.isBlank()) {
+           searchText = searchText.toLowerCase();
+           if ((fieldName != null && fieldName.toLowerCase().contains(searchText)) 
+              || (fieldLabel != null && fieldLabel.toLowerCase().contains(searchText))) {
+               return true;
+           } else {
+               return false;
+           }
+       }
+       return true;
+   }
 }

@@ -26,16 +26,16 @@
 
 package com.salesforce.dataloader.model;
 
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.config.AppConfig;
 
 /**
  * all possible criteria for login into the api
  */
 public class LoginCriteria {
 
-    public static final int Default = 0;
-    public static final int Standard = 1;
-    public static final int Advanced = 2;
+    public static final int OAuthLogin = 0;
+    public static final int UsernamePasswordLogin = 1;
+    public static final int SessionIdLogin = 2;
 
     String instanceUrl;
     String userName;
@@ -93,28 +93,21 @@ public class LoginCriteria {
         this.sessionId = sessionId;
     }
 
-    public void updateConfig(Config config) {
-        config.setValue(Config.USERNAME, config.STRING_DEFAULT);
-        config.setValue(Config.PASSWORD, config.STRING_DEFAULT);
-        config.setValue(Config.SFDC_INTERNAL_IS_SESSION_ID_LOGIN, false);
-        config.setValue(Config.SFDC_INTERNAL_SESSION_ID, config.STRING_DEFAULT);
-        config.setValue(Config.OAUTH_ENVIRONMENT, config.STRING_DEFAULT);
-
+    public void updateConfig(AppConfig appConfig) {
         switch (getMode()){
-            case LoginCriteria.Standard:
-                config.setValue(Config.USERNAME, getUserName().trim());
-                config.setValue(Config.PASSWORD, getPassword().trim());
-                config.setValue(Config.ENDPOINT, getInstanceUrl().trim());
+            case LoginCriteria.UsernamePasswordLogin:
+                appConfig.setValue(AppConfig.PROP_SFDC_INTERNAL_IS_SESSION_ID_LOGIN, false);
+                appConfig.setValue(AppConfig.PROP_USERNAME, getUserName().trim());
+                appConfig.setValue(AppConfig.PROP_PASSWORD, getPassword().trim());
                 break;
-            case LoginCriteria.Advanced:
-                config.setValue(Config.USERNAME, getUserName().trim());
-                config.setValue(Config.SFDC_INTERNAL_IS_SESSION_ID_LOGIN, true);
-                config.setValue(Config.SFDC_INTERNAL_SESSION_ID, getSessionId().trim());
-                config.setValue(Config.ENDPOINT, getInstanceUrl().trim());
+            case LoginCriteria.SessionIdLogin:
+                appConfig.setValue(AppConfig.PROP_SFDC_INTERNAL_IS_SESSION_ID_LOGIN, true);
+                appConfig.setValue(AppConfig.PROP_USERNAME, getUserName().trim());
+                appConfig.setValue(AppConfig.PROP_SFDC_INTERNAL_SESSION_ID, getSessionId().trim());
                 break;
-            case LoginCriteria.Default:
-                config.setOAuthEnvironment(getEnvironment());
+            case LoginCriteria.OAuthLogin:
                 break;
         }
+        appConfig.setServerEnvironment(getEnvironment());
     }
 }

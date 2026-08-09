@@ -43,11 +43,11 @@ import com.salesforce.dataloader.ui.MappingDialog;
  */
 public class SforceDragListener extends DragSourceAdapter {
     private final StructuredViewer viewer;
-    private final MappingDialog dlg;
+    private final MappingDialog mappingDialog;
 
     public SforceDragListener(StructuredViewer viewer, MappingDialog dialog) {
         this.viewer = viewer;
-        this.dlg = dialog;
+        this.mappingDialog = dialog;
     }
 
     /**
@@ -59,17 +59,16 @@ public class SforceDragListener extends DragSourceAdapter {
         //if the gadget was moved, remove it from the source viewer
 
         try {
-            if (event.detail == DND.DROP_MOVE) {
+            if (event.detail == DND.DROP_MOVE && !mappingDialog.isDragActionCancelled()) {
                 IStructuredSelection selection = (IStructuredSelection)viewer.getSelection();
-                for (Iterator it = selection.iterator(); it.hasNext();) {
+                for (Iterator<?> it = selection.iterator(); it.hasNext();) {
                     @SuppressWarnings("unchecked")
                     Map.Entry<String, String> eventElem = (Entry<String, String>)it.next();
                     eventElem.setValue("");
-                    dlg.getMapper().removeMapping(eventElem.getKey());
+                    mappingDialog.getMapper().removeMapping(eventElem.getKey());
                 }
-
+                mappingDialog.packMappingColumns();
                 viewer.refresh();
-                dlg.packMappingColumns();
             }
         } catch (Exception e) {
             e.printStackTrace();

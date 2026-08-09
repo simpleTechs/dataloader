@@ -27,10 +27,18 @@
 package com.salesforce.dataloader.dyna;
 
 import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import org.apache.commons.beanutils.ConversionException;
 import org.apache.commons.beanutils.Converter;
+import com.salesforce.dataloader.util.DLLogManager;
+import org.apache.logging.log4j.Logger;
 
+import com.salesforce.dataloader.action.visitor.DAOLoadVisitor;
+import com.salesforce.dataloader.config.AppConfig;
+import com.salesforce.dataloader.config.Messages;
+import com.salesforce.dataloader.util.AppUtil;
 import com.sforce.ws.util.FileUtil;
 
 /**
@@ -40,34 +48,13 @@ import com.sforce.ws.util.FileUtil;
  */
 
 public final class FileByteArrayConverter implements Converter {
+    private static Logger logger;
 
     // ----------------------------------------------------------- Constructors
 
     public FileByteArrayConverter() {
-
-        this.defaultValue = null;
-        this.useDefault = false;
-
+        logger = DLLogManager.getLogger(this.getClass());
     }
-
-    public FileByteArrayConverter(Object defaultValue) {
-
-        this.defaultValue = defaultValue;
-        this.useDefault = true;
-
-    }
-
-    // ----------------------------------------------------- Instance Variables
-
-    /**
-     * The default value specified to our Constructor, if any.
-     */
-    private Object defaultValue = null;
-
-    /**
-     * Should we return the default value on conversion errors?
-     */
-    private boolean useDefault = true;
 
     // --------------------------------------------------------- Public Methods
 
@@ -82,21 +69,55 @@ public final class FileByteArrayConverter implements Converter {
      *                if conversion cannot be performed successfully
      */
     @Override
+    @SuppressWarnings({ "rawtypes", "unchecked" })
     public Object convert(Class type, Object value) {
 
         if (value == null || String.valueOf(value).length() == 0) { return null; }
-
+        final String absolutePath = new File(String.valueOf(value.toString())).getAbsolutePath();
+        final ByteArrayOutputStream byteStream = new ByteArrayOutputStream();
         try {
-            final ByteArrayOutputStream byteStream = new ByteArrayOutputStream();
             // just in case the file is not found we want to display the absolute file name to the user
-            final String absolutePath = new File(String.valueOf(value.toString())).getAbsolutePath();
+            File file = new File(absolutePath);
+            if (!file.canRead()) {
+                logger.debug("Attempting to enable readable flag on file " + absolutePath);
+                file.setReadable(true);
+            }
             FileUtil.copy(new FileInputStream(absolutePath), byteStream);
-            return byteStream.toByteArray();
-        } catch (Exception e) {
-            if (useDefault) {
-                return (defaultValue);
+            Path pathToValueFile = Path.of(absolutePath);
+            String mimeType = Files.probeContentType(pathToValueFile);
+            AppConfig appConfig = AppConfig.getCurrentConfig();
+            if (mimeType != null
+                    && mimeType.equalsIgnoreCase("text/plain")
+                    && appConfig != null
+                    && appConfig.getBoolean(AppConfig.PROP_LOAD_PRESERVE_WHITESPACE_IN_RICH_TEXT)
+                    && AppUtil.isContentSObject(appConfig.getString(AppConfig.PROP_ENTITY))) {
+                // Preserve the formatting only if the content is of type plain text
+                // AND the flag to preserve whitespace characters in RichText fields is enabled
+                // AND the content is for ContentNote sobject. 
+                //     See https://help.salesforce.com/s/articleView?id=000387816&type=1 for how
+                //     data loader processes ContentNote.
+                String content = byteStream.toString();
+                String formattedContent = DAOLoadVisitor.preserveWhitespaceInRichText(content, AppConfig.DEFAULT_RICHTEXT_REGEX);
+                return formattedContent.getBytes();
             } else {
-                throw new ConversionException(e);
+                return byteStream.toByteArray();
+            }
+        } catch (Exception e) {
+            if (e instanceof java.io.FileNotFoundException) {
+                if (AppUtil.getOSType() == AppUtil.OSType.MACOSX 
+                        && (absolutePath.contains("/Desktop/") || absolutePath.contains("/Downloads/"))) {
+                    logger.error(Messages.getMessage(this.getClass(), "insufficientAccessToContentOnMacMsg1", absolutePath));
+                    logger.error(Messages.getMessage(this.getClass(), "insufficientAccessToContentOnMacMsg2"));
+                } else {
+                    logger.error(Messages.getMessage(this.getClass(), "insufficientAccessToContentGenericMsg", absolutePath));
+                }
+            }
+            throw new ConversionException(e);
+        } finally {
+            try {
+                byteStream.close();
+            } catch (Exception ex) {
+                // do nothing
             }
         }
     }

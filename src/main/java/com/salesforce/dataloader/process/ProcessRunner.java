@@ -23,162 +23,153 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
+
 package com.salesforce.dataloader.process;
-/*
- * Copyright (c) 2005, salesforce.com, inc.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without modification, are permitted provided
- * that the following conditions are met:
- *
- *    Redistributions of source code must retain the above copyright notice, this list of conditions and the
- *    following disclaimer.
- *
- *    Redistributions in binary form must reproduce the above copyright notice, this list of conditions and
- *    the following disclaimer in the documentation and/or other materials provided with the distribution.
- *
- *    Neither the name of salesforce.com, inc. nor the names of its contributors may be used to endorse or
- *    promote products derived from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
- * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
- * PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
- * TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
- * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
-
-
-/**
- * @author Lexi Viripaeff
- */
-
-import java.util.*;
-import java.util.Calendar;
-
-import javax.xml.parsers.FactoryConfigurationError;
-
-import org.apache.log4j.Logger;
-import org.quartz.*;
-import org.springframework.beans.factory.InitializingBean;
 
 import com.salesforce.dataloader.action.progress.ILoaderProgress;
 import com.salesforce.dataloader.action.progress.NihilistProgressAdapter;
-import com.salesforce.dataloader.config.*;
+import com.salesforce.dataloader.config.AppConfig;
+import com.salesforce.dataloader.config.LastRunProperties;
+import com.salesforce.dataloader.config.Messages;
 import com.salesforce.dataloader.controller.Controller;
-import com.salesforce.dataloader.exception.*;
+import com.salesforce.dataloader.exception.ConfigInitializationException;
+import com.salesforce.dataloader.exception.ControllerInitializationException;
+import com.salesforce.dataloader.exception.OAuthBrowserLoginRunnerException;
+import com.salesforce.dataloader.exception.ParameterLoadException;
+import com.salesforce.dataloader.exception.ProcessInitializationException;
+import com.salesforce.dataloader.util.AppUtil;
+import com.salesforce.dataloader.util.ExitException;
 import com.sforce.soap.partner.fault.ApiFault;
+import com.salesforce.dataloader.util.DLLogManager;
+import org.apache.logging.log4j.Logger;
+import org.springframework.beans.factory.InitializingBean;
+import com.salesforce.dataloader.oauth.OAuthFlowHandler;
 
-public class ProcessRunner implements InitializingBean, Job, Runnable {
+import java.io.IOException;
+import java.util.Calendar;
+import java.util.HashMap;
+import java.util.Map;
 
-    /**
-     * Comment for <code>PROCESS_NAME</code>
-     */
-    public static final String PROCESS_NAME = "process.name";
+public class ProcessRunner implements InitializingBean, IProcess {
 
-    //logger
-    private static final Logger logger = Logger.getLogger(ProcessRunner.class);
+    private static final Logger logger = DLLogManager.getLogger(ProcessRunner.class);
+    private static final String[] PROP_NAME_ARRAY = {
+            AppConfig.PROP_OPERATION,
+            AppConfig.PROP_USERNAME,
+            AppConfig.PROP_PASSWORD,
+            AppConfig.PROP_DAO_TYPE,
+            AppConfig.PROP_DAO_NAME,
+            AppConfig.PROP_ENTITY,
+    };
 
-    // Name of the current engine runner.  Improves readability of the log output
-    String name;
+    private String name;
+    private final Map<String, String> configOverrideMap = new HashMap<>();
+    private final Controller controller;
+    private ILoaderProgress monitor;
 
-    // config override parameters
-    private final Map<String, String> configOverrideMap = new HashMap<String, String>();
+    public ProcessRunner(Controller controller) {
+        this.controller = controller;
+    }
 
-    private Controller controller;
-
-    /**
-     * Enforce use of factory method - getInstance() by hiding the constructor
-     */
     protected ProcessRunner() {
+        this.controller = null;
     }
 
-    @Override
-    public synchronized void run() {
-        run(NihilistProgressAdapter.get());
-    }
-
-    public synchronized void run(ILoaderProgress monitor) {
+    public synchronized void run(ILoaderProgress monitor) throws Exception {
+        this.monitor = (monitor == null) ? new NihilistProgressAdapter() : monitor;
         final String oldName = Thread.currentThread().getName();
-        final String name = getName();
-
-        setThreadName(name);
+        setThreadName(getName());
 
         try {
-            controller = Controller.getInstance(name, true);
-        } catch (ControllerInitializationException e) {
-            throw new RuntimeException(e);
-        }
-
-        try {
-            logger.info(Messages.getString("Process.initializingEngine")); //$NON-NLS-1$
-            Config config = controller.getConfig();
-            // load parameter overrides (from command line or caller context)
-            logger.info(Messages.getString("Process.loadingParameters")); //$NON-NLS-1$
-            config.loadParameterOverrides(getConfigOverrideMap());
-
-            // create files for status output unless it's an extract and status output is disabled
-            if (!config.getOperationInfo().isExtraction() || config.getBoolean(Config.ENABLE_EXTRACT_STATUS_OUTPUT)) {
-                controller.setStatusFiles(config.getString(Config.OUTPUT_STATUS_DIR), true, false);
-            }
-
-            logger.info(Messages.getFormattedString("Process.loggingIn", config.getString(Config.ENDPOINT))); //$NON-NLS-1$
-            if (controller.login()) {
-                // instantiate the data access object
-                controller.createDao();
-
-                logger.info(Messages.getString("Process.checkingDao")); //$NON-NLS-1$
-                // check to see if the the data access object has any connection problems
-                controller.getDao().checkConnection();
-
-                // get the field info (using the describe call)
-                logger.info(Messages.getString("Process.settingFieldTypes")); //$NON-NLS-1$
-                controller.setFieldTypes();
-
-                // get the object reference info (using the describe call)
-                logger.info(Messages.getString("Process.settingReferenceTypes")); //$NON-NLS-1$
-                controller.setReferenceDescribes();
-
-                // instantiate the map
-                logger.info(Messages.getString("Process.creatingMap")); //$NON-NLS-1$
-                controller.createMapper();
-
-                // execute the requested operation
-                controller.executeAction(monitor);
-
-                // save last successful run date
-                // FIXME look into a better place so that long runs don't skew this
-                config.setValue(LastRun.LAST_RUN_DATE, Calendar.getInstance().getTime());
-                config.saveLastRun();
-            } else {
-                logger.fatal(Messages.getString("Process.loginError")); //$NON-NLS-1$
-            }
+            initializeController();
+            AppConfig appConfig = controller.getAppConfig();
+            handleOAuthLogin(appConfig);
+            validateConfigProperties(appConfig);
+            setThreadNameIfNeeded(appConfig);
+            createStatusFilesIfNeeded(appConfig);
+            executeProcess(appConfig);
         } catch (ApiFault e) {
-            // this is necessary, because the ConnectionException doesn't display the login fault message
             throw new RuntimeException(e.getExceptionMessage(), e);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
         } finally {
-            // make sure all is closed and saved
-            if (controller.getDao() != null) controller.getDao().close();
-
-            // restore original thread name
+            closeResources();
             setThreadName(oldName);
         }
     }
 
-    private static void ensureLogging() throws FactoryConfigurationError {
-        Controller.initLog();
+    private void initializeController() throws ControllerInitializationException, ParameterLoadException, ConfigInitializationException {
+        if (controller == null) {
+            // In batch mode, create a new controller instance
+            Controller newController = Controller.getInstance(getConfigOverrideMap());
+            if (newController == null) {
+                throw new ControllerInitializationException("Failed to initialize controller");
+            }
+            // Use reflection to set the controller field since it's final
+            try {
+                java.lang.reflect.Field field = ProcessRunner.class.getDeclaredField("controller");
+                field.setAccessible(true);
+                field.set(this, newController);
+            } catch (Exception e) {
+                throw new ControllerInitializationException("Failed to set controller: " + e.getMessage());
+            }
+        }
+    }
+
+    private void handleOAuthLogin(AppConfig appConfig) throws OAuthBrowserLoginRunnerException {
+        if (requiresOAuthLogin(appConfig)) {
+        	doBrowserLogin(appConfig);
+        }
+    }
+
+    private boolean requiresOAuthLogin(AppConfig appConfig) {
+        return !(appConfig.contains(AppConfig.PROP_USERNAME) && appConfig.contains(AppConfig.PROP_PASSWORD));
+    }
+
+    private void setThreadNameIfNeeded(AppConfig appConfig) {
+        if (name == null || name.isBlank()) {
+            name = appConfig.getString(AppConfig.PROP_OPERATION);
+            setName(name);
+            setThreadName(name);
+        }
+    }
+
+    private void createStatusFilesIfNeeded(AppConfig appConfig) throws ProcessInitializationException {
+        if (!appConfig.getOperationInfo().isExtraction() || appConfig.getBoolean(AppConfig.PROP_ENABLE_EXTRACT_STATUS_OUTPUT)) {
+            controller.setStatusFiles(appConfig.getString(AppConfig.PROP_OUTPUT_STATUS_DIR), true, false);
+        }
+    }
+
+    private void executeProcess(AppConfig appConfig) throws Exception {
+        if (controller.login()) {
+            controller.setFieldTypes();
+            controller.initializeOperation(appConfig.getString(AppConfig.PROP_DAO_TYPE),
+                    appConfig.getString(AppConfig.PROP_DAO_NAME), appConfig.getString(AppConfig.PROP_ENTITY));
+            controller.executeAction(monitor);
+            saveLastRunDate(appConfig);
+        } else {
+            logger.fatal(Messages.getString("Process.loginError"));
+        }
+    }
+
+    private void saveLastRunDate(AppConfig appConfig) throws IOException {
+        appConfig.setValue(LastRunProperties.LAST_RUN_DATE, Calendar.getInstance().getTime());
+        appConfig.saveLastRun();
+    }
+
+    private void closeResources() {
+        if (controller != null && controller.getDao() != null) {
+            controller.getDao().close();
+        }
+    }
+
+    public ILoaderProgress getMonitor() {
+        return this.monitor;
     }
 
     private void setThreadName(final String name) {
-        if (name != null && name.length() > 0) {
+        if (name != null && !name.isBlank()) {
             try {
                 Thread.currentThread().setName(name);
             } catch (Exception e) {
-                // ignore, just leave the default thread name intact
                 logger.warn("Error setting thread name", e);
             }
         }
@@ -189,11 +180,15 @@ public class ProcessRunner implements InitializingBean, Job, Runnable {
     }
 
     public synchronized void setConfigOverrideMap(Map<String, String> configOverrideMap) {
-        if (this.configOverrideMap.isEmpty())
+        if (this.configOverrideMap.isEmpty()) {
             this.configOverrideMap.putAll(configOverrideMap);
-        else
+            if (getName() != null && !getName().isBlank()) {
+                this.configOverrideMap.put(AppConfig.PROP_PROCESS_NAME, getName());
+            }
+        } else {
             throw new IllegalStateException("Attempting to set configOverrideMap but there are already "
                     + this.configOverrideMap.size() + " entries");
+        }
     }
 
     public synchronized String getName() {
@@ -204,129 +199,133 @@ public class ProcessRunner implements InitializingBean, Job, Runnable {
         this.name = name;
     }
 
-    /* (non-Javadoc)
-     * @see org.springframework.beans.factory.InitializingBean#afterPropertiesSet()
-     */
     @Override
     public void afterPropertiesSet() throws Exception {
-        final String name = getName();
-        if(name == null || name.length() == 0) {
+        if (name == null || name.isBlank()) {
             logger.fatal(Messages.getFormattedString("Process.missingRequiredArg", "name"));
             throw new ParameterLoadException(Messages.getFormattedString("Process.missingRequiredArg", "name"));
         }
     }
 
-    private static boolean validateCmdLineArgs (String[] args) {
-
-        for (int i = 0; i < args.length; i++) {
-            String arg = args[i];
-            if ("-help".equals(arg) ) {
-                System.out.println(Messages.getString("Process.help1"));
-                System.out.println(Messages.getString("Process.help2"));
-                System.out.println(Messages.getString("Process.help3"));
-                System.out.println(Messages.getString("Process.help4"));
-                System.out.println(Messages.getString("Process.help5"));
-                System.out.println(Messages.getString("Process.help6"));
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static void topLevelError(String message, Throwable err) {
-        ensureLogging();
-        logger.fatal(message, err);
-        System.exit(-1);
-    }
-
-    public static void main(String[] args) {
-        ProcessRunner runner = null;
-        try {
-            // create the process
-            runner = ProcessRunner.getInstance(args);
-            if (runner == null) topLevelError("Process runner is null", new NullPointerException());
-        } catch (Throwable t) {
-            topLevelError("Failed to create process", t);
-        }
-        try {
-            // run the process
-            runner.run();
-        } catch (Throwable e) {
-            topLevelError("Unable to run process " + runner.getName(), e);
-        }
-    }
-
-    /**
-     * Get an instance of the engine runner that can be scheduled in it's own thread
-     *
-     * @param args String set of name=value pairs of arguments for the runner
-     * @throws ProcessInitializationException
-     */
-    private static ProcessRunner getInstance(String[] args) throws ProcessInitializationException {
-        ensureLogging();
-
-        if(!validateCmdLineArgs(args)) {
-            return null;
-        }
-
-        Map<String,String> argMap = getArgMap(args);
-        ProcessRunner runner = getInstance(argMap);
-        return runner;
-    }
-
-    /**
-     * @param argMap
-     * @return instance of ProcessRunner
-     * @throws ProcessInitializationException
-     */
-    public static ProcessRunner getInstance(Map<String, String> argMap) throws ProcessInitializationException {
-        ProcessRunner runner;
-        if(argMap != null && argMap.containsKey(PROCESS_NAME)) {
-            // if process name is specified, get it from configuration
-            String processName = argMap.get(PROCESS_NAME);
-            runner = ProcessConfig.getProcessInstance(processName);
-            // command line param values override the ones in config file
-            runner.getConfigOverrideMap().putAll(argMap);
+    public static void logErrorAndExitProcess(String message, Throwable throwable, int exitCode) {
+        if (throwable == null) {
+            logger.fatal(message);
         } else {
-            // if process.name is not given, load defaults & override with command-line args
-            runner = new ProcessRunner();
-            runner.setConfigOverrideMap(argMap);
+            logger.fatal(message, throwable);
+        }
+        throw new ExitException(throwable, exitCode);
+    }
+
+    public static ProcessRunner runBatchMode(Map<String, String> commandLineOptionsMap, ILoaderProgress progressMonitor) throws UnsupportedOperationException {
+        ProcessRunner runner = null;
+        String errorMessage = "";
+        int exitCode = AppUtil.EXIT_CODE_NO_ERRORS;
+        Throwable throwable = null;
+        try {
+            runner = getInstance(commandLineOptionsMap);
+            if (runner == null) {
+                logErrorAndExitProcess("Process runner is null", new NullPointerException(), AppUtil.EXIT_CODE_CLIENT_ERROR);
+            }
+            runner.run(progressMonitor);
+            progressMonitor = runner.getMonitor();
+            handleProgressMonitor(progressMonitor);
+        } catch (Throwable t) {
+            handleThrowable(t);
+        } finally {
+            if (exitCode != AppUtil.EXIT_CODE_NO_ERRORS) {
+                logErrorAndExitProcess(errorMessage, throwable, exitCode);
+            }
         }
         return runner;
     }
 
-    private static Map<String, String> getArgMap(String[] args) {
-        //every arg is a name=value config setting, save it in a map of name/value pairs
-        Map<String,String> argMap = new HashMap<String,String>();
-        for (int i = 0; i < args.length; i++) {
-            String[] argArray = args[i].split("="); //$NON-NLS-1$
-
-            if (argArray.length == 2) {
-                argMap.put(argArray[0], argArray[1]);
+    private static void handleProgressMonitor(ILoaderProgress progressMonitor) {
+        if (progressMonitor != null) {
+            if (progressMonitor.isCanceled()) {
+                logErrorAndExitProcess(progressMonitor.getMessage(), null, AppUtil.EXIT_CODE_CLIENT_ERROR);
+            } else if (!progressMonitor.isSuccess()) {
+                logErrorAndExitProcess(progressMonitor.getMessage(), null, AppUtil.EXIT_CODE_SERVER_ERROR);
+            } else if (AppConfig.getCurrentConfig() != null
+                    && AppConfig.getCurrentConfig().getBoolean(AppConfig.PROP_PROCESS_EXIT_WITH_ERROR_ON_FAILED_ROWS_BATCH_MODE)
+                    && progressMonitor.getNumberRowsWithError() > 0) {
+                logErrorAndExitProcess(Messages.getFormattedString("Process.operationSuccessWithErrorRows", progressMonitor.getNumberRowsWithError()), null, AppUtil.EXIT_CODE_RESULTS_ERROR);
             }
         }
-        return argMap;
     }
 
-    /**
-     * Get process runner based on the name by reading the bean from configuration file
-     * @param processName
-     * @return A default instance of ProcessRunner (based on config)
-     * @throws ProcessInitializationException
-     */
+    private static void handleThrowable(Throwable t) throws UnsupportedOperationException, ExitException {
+        if (t instanceof UnsupportedOperationException) {
+            throw (UnsupportedOperationException) t;
+        }
+        if (t instanceof ExitException) {
+            throw (ExitException) t;
+        }
+        logErrorAndExitProcess("Unable to run process", t, AppUtil.EXIT_CODE_OPERATION_ERROR);
+    }
+
+    private static synchronized ProcessRunner getInstance(Map<String, String> commandLineOptionsMap) throws ProcessInitializationException {
+        logger.info(Messages.getString("Process.initializingEngine"));
+        String dynaBeanID = commandLineOptionsMap.get(AppConfig.PROP_PROCESS_NAME);
+        ProcessRunner runner;
+        if (dynaBeanID == null || dynaBeanID.isEmpty()) {
+            logger.info(AppConfig.PROP_PROCESS_NAME + " is not specified in the command line. Loading the process properties from config.properties.");
+            runner = new ProcessRunner();
+            if (commandLineOptionsMap.containsKey(AppConfig.PROP_PROCESS_THREAD_NAME)) {
+                runner.setName(commandLineOptionsMap.get(AppConfig.PROP_PROCESS_THREAD_NAME));
+            }
+        } else {
+            logger.info(AppConfig.PROP_PROCESS_NAME + " is specified in the command line. Loading DynaBean with id " + dynaBeanID + " from process-conf.xml located in folder " + AppConfig.getConfigurationsDir());
+            runner = ProcessConfig.getProcessInstance(dynaBeanID);
+        }
+        runner.getConfigOverrideMap().putAll(commandLineOptionsMap);
+        return runner;
+    }
+
     public static ProcessRunner getInstance(String processName) throws ProcessInitializationException {
         return ProcessConfig.getProcessInstance(processName);
     }
 
-    /* (non-Javadoc)
-     * @see org.quartz.Job#execute(org.quartz.JobExecutionContext)
-     */
-    @Override
-    public void execute(JobExecutionContext arg0) throws JobExecutionException {
-        run();
-    }
-
     public Controller getController() {
         return controller;
+    }
+
+    private static void validateConfigProperties(AppConfig appConfig) throws ProcessInitializationException {
+        if (appConfig == null) {
+            throw new ProcessInitializationException("Configuration not initialized");
+        }
+        for (String propName : PROP_NAME_ARRAY) {
+            String propVal = appConfig.getString(propName);
+            if (propName.equals(AppConfig.PROP_PASSWORD) && (propVal == null || propVal.isBlank())) {
+                propVal = appConfig.getString(AppConfig.PROP_OAUTH_ACCESSTOKEN);
+            }
+            if (propVal == null || propVal.isBlank()) {
+                logger.fatal(Messages.getFormattedString(AppConfig.class.getSimpleName() + ".errorNoRequiredParameter", propName));
+                throw new ParameterLoadException(Messages.getFormattedString(AppConfig.class.getSimpleName() + ".errorNoRequiredParameter", propName));
+            }
+        }
+    }
+
+    void doBrowserLogin(AppConfig appConfig) throws OAuthBrowserLoginRunnerException {
+        try {
+            logger.debug("Starting OAuth browser login...");
+            logger.debug("A browser window will open for you to log in to Salesforce.");
+            logger.debug("Please complete your login in the browser window.");
+            
+            if (controller == null) {
+                throw new OAuthBrowserLoginRunnerException("Controller is not initialized");
+            }
+            
+            OAuthFlowHandler oauthHandler = new OAuthFlowHandler(appConfig, (status) -> logger.info("OAuth status: " + status), controller, () -> {});
+            boolean success = oauthHandler.handleOAuthLogin();
+            
+            if (success) {
+                logger.debug("OAuth browser login completed successfully!");
+            } else {
+                throw new OAuthBrowserLoginRunnerException("OAuth browser login failed - authentication could not be completed");
+            }
+        } catch (Exception ex) {
+            logger.error("OAuth browser login failed: " + ex.getMessage());
+            throw new OAuthBrowserLoginRunnerException("OAuth browser login failed: " + ex.getMessage());
+        }
     }
 }

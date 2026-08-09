@@ -25,19 +25,21 @@
  */
 package com.salesforce.dataloader.ui;
 
-import com.salesforce.dataloader.config.Config;
-import org.apache.http.client.utils.URIBuilder;
-import org.apache.log4j.Logger;
+
+import com.salesforce.dataloader.config.AppConfig;
+
+import org.apache.logging.log4j.Logger;
+import com.salesforce.dataloader.util.DLLogManager;
+
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.browser.Browser;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Dialog;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 
 import java.io.UnsupportedEncodingException;
-import java.net.URISyntaxException;
-import java.util.HashMap;
-import java.util.Map;
 
 /**
  * OAuthFlow is basic instrumentation of delegating authentication to an external web browser using OAuth2
@@ -45,14 +47,14 @@ import java.util.Map;
  * by individuals using connected apps as it requires storing a secret which cannot be done for the normal login
  */
 public abstract class OAuthFlow extends Dialog {
-    protected static Logger logger = Logger.getLogger(OAuthFlow.class);
-    protected final Config config;
+    protected static Logger logger = DLLogManager.getLogger(OAuthFlow.class);
+    protected final AppConfig appConfig;
     private String reasonPhrase;
     private int statusCode;
 
-    public OAuthFlow(Shell parent, Config config) {
+    public OAuthFlow(Shell parent, AppConfig appConfig) {
         super(parent);
-        this.config = config;
+        this.appConfig = appConfig;
     }
 
     public String getReasonPhrase() {
@@ -66,16 +68,23 @@ public abstract class OAuthFlow extends Dialog {
     public boolean open() throws UnsupportedEncodingException {
         // Create the dialog window
         Display display = getParent().getDisplay();
-        Shell shell = new Shell(getParent(), SWT.DIALOG_TRIM | SWT.APPLICATION_MODAL | SWT.FILL);
-        Grid12 grid = new Grid12(shell, 30, 600);
+        Shell shell = new Shell(getParent(), SWT.RESIZE | SWT.DIALOG_TRIM | SWT.APPLICATION_MODAL | SWT.FILL);
+        GridLayout layout = new GridLayout(1, false);
+        shell.setLayout(layout);
 
         // Create the web browser
         Browser browser = new Browser(shell, SWT.NONE);
-        browser.setLayoutData(grid.createCell(12));
+        GridData data = new GridData();
+        data.horizontalAlignment = SWT.FILL;
+        data.grabExcessHorizontalSpace = true;
+        data.grabExcessVerticalSpace = true;
+        data.widthHint = 400;
+        data.heightHint = 600;
+        browser.setLayoutData(data);
 
-        OAuthBrowserListener listener = getOAuthBrowserListener(shell, browser, config);
+        OAuthBrowserListener listener = getOAuthBrowserListener(shell, browser, appConfig);
         browser.addProgressListener(listener);
-        browser.setUrl(getStartUrl(config));
+        browser.setUrl(getStartUrl(appConfig));
 
         shell.pack();
         shell.open();
@@ -88,20 +97,9 @@ public abstract class OAuthFlow extends Dialog {
 
         reasonPhrase = listener.getReasonPhrase();
         statusCode = listener.getStatusCode();
-
-
         return listener.getResult();
     }
 
-    protected abstract OAuthBrowserListener getOAuthBrowserListener(Shell shell, Browser browser, Config config);
-
-    public abstract String getStartUrl(Config config) throws UnsupportedEncodingException;
-
-    public static Map<String, String> getQueryParameters(String url) throws URISyntaxException {
-        url = url.replace("#","?");
-        Map<String, String> params = new HashMap<>();
-        new URIBuilder(url).getQueryParams().stream().forEach(kvp -> params.put(kvp.getName(), kvp.getValue()));
-        return params;
-    }
-
+    protected abstract OAuthBrowserListener getOAuthBrowserListener(Shell shell, Browser browser, AppConfig appConfig);
+    public abstract String getStartUrl(AppConfig appConfig) throws UnsupportedEncodingException;
 }

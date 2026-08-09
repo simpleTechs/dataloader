@@ -25,9 +25,13 @@
  */
 package com.salesforce.dataloader.dao;
 
-import org.apache.log4j.Logger;
+import org.apache.logging.log4j.Logger;
 
-import com.salesforce.dataloader.config.Config;
+import java.io.File;
+
+import com.salesforce.dataloader.util.DLLogManager;
+
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.config.Messages;
 import com.salesforce.dataloader.dao.csv.CSVFileReader;
 import com.salesforce.dataloader.dao.csv.CSVFileWriter;
@@ -37,27 +41,27 @@ import com.salesforce.dataloader.exception.DataAccessObjectInitializationExcepti
 import com.salesforce.dataloader.exception.UnsupportedDataAccessObjectException;
 
 public class DataAccessObjectFactory {
-    private static Logger logger = Logger.getLogger(DataAccessObjectFactory.class);
+    private static Logger logger = DLLogManager.getLogger(DataAccessObjectFactory.class);
 
     static public final String CSV_READ_TYPE = "csvRead";
     static public final String CSV_WRITE_TYPE = "csvWrite";
     static public final String DATABASE_READ_TYPE = "databaseRead";
     static public final String DATABASE_WRITE_TYPE = "databaseWrite";
 
-    public DataAccessObject getDaoInstance(String daoType, Config config)
+    public DataAccessObjectInterface getDaoInstance(String daoType, AppConfig appConfig)
             throws DataAccessObjectInitializationException {
-        DataAccessObject dao = null;
+        DataAccessObjectInterface dao = null;
 
-        logger.info(Messages.getFormattedString("DataAccessObjectFactory.creatingDao", new String[] {config.getString(Config.DAO_NAME), daoType}));
+        logger.info(Messages.getFormattedString("DataAccessObjectFactory.creatingDao", new String[] {appConfig.getString(AppConfig.PROP_DAO_NAME), daoType}));
 
         if (CSV_READ_TYPE.equalsIgnoreCase(daoType)) {
-            dao = new CSVFileReader(config);
+            dao = new CSVFileReader(new File(appConfig.getString(AppConfig.PROP_DAO_NAME)), appConfig, false, false);
         } else if (CSV_WRITE_TYPE.equalsIgnoreCase(daoType)) {
-            dao = new CSVFileWriter(config.getString(Config.DAO_NAME), config);
+            dao = new CSVFileWriter(appConfig.getString(AppConfig.PROP_DAO_NAME), appConfig, appConfig.getString(AppConfig.PROP_CSV_DELIMITER_FOR_QUERY_RESULTS));
         } else if (DATABASE_READ_TYPE.equalsIgnoreCase(daoType)) {
-            dao = new DatabaseReader(config);
+            dao = new DatabaseReader(appConfig);
         } else if (DATABASE_WRITE_TYPE.equalsIgnoreCase(daoType)) {
-            dao = new DatabaseWriter(config);
+            dao = new DatabaseWriter(appConfig);
         } else {
             String errMsg = Messages.getFormattedString("DataAccessObjectFactory.daoTypeNotSupported", daoType);
             logger.error(errMsg);

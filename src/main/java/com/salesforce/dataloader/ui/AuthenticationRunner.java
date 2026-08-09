@@ -26,108 +26,200 @@
 
 package com.salesforce.dataloader.ui;
 
-import com.salesforce.dataloader.client.DefaultSimplePost;
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.client.transport.HttpTransportInterface;
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.controller.Controller;
 import com.salesforce.dataloader.model.LoginCriteria;
 import com.salesforce.dataloader.util.ExceptionUtil;
-import com.sforce.soap.partner.fault.LoginFault;
-import com.sforce.soap.partner.fault.UnexpectedErrorFault;
-import org.apache.log4j.Logger;
-import org.eclipse.swt.custom.BusyIndicator;
+import com.salesforce.dataloader.util.OAuthServerFlow;
+import com.sforce.soap.partner.PartnerConnection;
+import com.sforce.soap.partner.QueryResult;
+import com.sforce.soap.partner.sobject.SObject;
+import com.sforce.ws.ConnectionException;
+import com.sforce.ws.bind.XmlObject;
+
+import org.apache.logging.log4j.Logger;
+import com.salesforce.dataloader.util.DLLogManager;
+
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 
+import java.util.Iterator;
 import java.util.function.Consumer;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.net.ServerSocket;
+import com.salesforce.dataloader.oauth.OAuthFlowHandler;
+import com.salesforce.dataloader.ui.Labels;
 
 /**
  * AuthenticationRunner is the UI orchestration of logging in.
  */
 public class AuthenticationRunner {
-    private static Logger logger = Logger.getLogger(AuthenticationRunner.class);
+    private static Logger logger = DLLogManager.getLogger(AuthenticationRunner.class);
 
-    private final Config config;
+    private final AppConfig appConfig;
     private final Controller controller;
-    private final Consumer<Boolean> complete;
     private final String nestedException = "nested exception is:";
     private final Shell shell;
-    private Consumer<String> messenger;
+    private Consumer<String> authStatusChangeConsumer;
     private LoginCriteria criteria;
+    private volatile boolean statusSet = false;
 
-
-    public AuthenticationRunner(Shell shell, Config config, Controller controller, Consumer<Boolean> complete) {
+    public AuthenticationRunner(Shell shell, AppConfig appConfig, Controller controller) {
         this.shell = shell;
-        this.config = config;
+        this.appConfig = appConfig;
         this.controller = controller;
-        this.complete = complete;
     }
 
-    public Config getConfig() {
-        return config;
+    public AppConfig getConfig() {
+        return appConfig;
     }
 
-
-
-    public void login(LoginCriteria criteria, Consumer<String> messenger) {
-        this.messenger = messenger;
+    public void login(LoginCriteria criteria, Consumer<String> messenger, Runnable onFlowComplete) {
+        this.authStatusChangeConsumer = messenger;
         this.criteria = criteria;
 
-        criteria.updateConfig(config);
+        criteria.updateConfig(appConfig);
 
-        BusyIndicator.showWhile(Display.getDefault(), new Thread(this::loginAsync));
+        new Thread(() -> loginAsync(onFlowComplete)).start();
     }
 
-    private void loginAsync(){
+    public void login(LoginCriteria criteria, Consumer<String> messenger) {
+        login(criteria, messenger, null);
+    }
+
+    private void loginAsync(Runnable onFlowComplete) {
+        statusSet = false;
         try {
-            messenger.accept(Labels.getString("SettingsPage.verifyingLogin"));
-
-            if (criteria.getMode() == LoginCriteria.Default){
-
-                boolean hasSecret = !config.getString(Config.OAUTH_CLIENTSECRET).trim().equals("");
-                OAuthFlow flow = hasSecret ? new OAuthSecretFlow(shell, config) : new OAuthTokenFlow(shell, config);
-                if (!flow.open()){
-                    String message = Labels.getString("SettingsPage.invalidLogin");
-                    if (flow.getStatusCode() == DefaultSimplePost.PROXY_AUTHENTICATION_REQUIRED) {
-                        message = Labels.getFormattedString("SettingsPage.proxyError", flow.getReasonPhrase());
+            // Check if OAuth is required
+            if (requiresOAuthLogin(appConfig)) {
+                OAuthFlowHandler oauthHandler = new OAuthFlowHandler(appConfig, this::updateStatus, controller, () -> {
+                    updateStatus("");
+                    if (onFlowComplete != null) {
+                        Display.getDefault().asyncExec(onFlowComplete);
                     }
-
-                    logger.info("Login failed:" + flow.getReasonPhrase());
-                    messenger.accept(message);
-                    complete.accept(false);
+                });
+                if (oauthHandler.handleOAuthLogin()) {
+                    updateStatus("OAuth login successful");
+                    if (onFlowComplete != null) {
+                        Display.getDefault().asyncExec(onFlowComplete);
+                    }
                     return;
                 }
+                if (!statusSet) {
+                    updateStatus("OAuth login failed");
+                }
+                if (onFlowComplete != null) {
+                    Display.getDefault().asyncExec(onFlowComplete);
+                }
+                return;
             }
-            if (controller.login() && controller.setEntityDescribes()) {
-                messenger.accept(Labels.getString("SettingsPage.loginSuccessful"));
-                controller.saveConfig();
-                complete.accept(true);
+
+            // If OAuth is not required, proceed with username/password login
+            updateStatus("Logging in...");
+            PartnerConnection conn = login();
+            if (conn != null) {
+                // Success message already set above in asyncExec
             } else {
-                messenger.accept(Labels.getString("SettingsPage.invalidLogin"));
-                complete.accept(false);
+                updateStatus(Labels.getString("AuthenticationRunner.loginFailedCheckCreds"));
             }
-        } catch (LoginFault lf ) {
-            messenger.accept(Labels.getString("SettingsPage.invalidLogin"));
-            complete.accept(false);
-        } catch (UnexpectedErrorFault e) {
-            handleError(e, e.getExceptionMessage());
-        } catch (Throwable e) {
-            handleError(e, e.getMessage());
+        } catch (Exception e) {
+            logger.error("Login failed", e);
+            updateStatus("Login failed: " + e.getMessage());
+        } finally {
+            if (onFlowComplete != null) {
+                Display.getDefault().asyncExec(onFlowComplete);
+            }
         }
+    }
+
+    private void updateStatus(String status) {
+        statusSet = true;
+        Display.getDefault().asyncExec(() -> authStatusChangeConsumer.accept(status));
+    }
+
+    private boolean requiresOAuthLogin(AppConfig config) {
+        return criteria.getMode() == LoginCriteria.OAuthLogin;
+    }
+
+    private PartnerConnection login() {
+        try {
+            if (controller.login() && controller.getEntityDescribes() != null) {
+                controller.saveConfig();
+                Display.getDefault().asyncExec(() -> {
+                    controller.updateLoaderWindowTitleAndCacheUserInfoForTheSession();
+                    updateStatus("Login successful");
+                });
+                return controller.getLoginClient().getConnection();
+            }
+        } catch (Exception e) {
+            logger.error("Error during username+password login", e);
+        }
+        return null;
+    }
+
+    private String getSoqlResultsAsString(String prefix, String soql, PartnerConnection conn) throws ConnectionException {
+        QueryResult result = conn.query(soql);
+        final SObject[] sfdcResults = result.getRecords();
+        String debugInfo = prefix;
+        if (sfdcResults != null) {
+            for (SObject sobj : sfdcResults) {
+                Iterator<XmlObject> fields = sobj.getChildren();
+                if (fields == null) continue;
+                String fieldsStr = "    ";
+                boolean isIdInFields = false;
+                while (fields.hasNext()) {
+                    XmlObject field = fields.next();
+                    if ("type".equalsIgnoreCase(field.getName().getLocalPart())) {
+                        continue;
+                    }
+                    if (field.getValue() == null || field.getValue().toString().isBlank()) {
+                        continue;
+                    }
+                    if ("id".equalsIgnoreCase(field.getName().getLocalPart())) {
+                        if (isIdInFields) {
+                            continue;
+                        }
+                        isIdInFields = true;
+                    }
+                    fieldsStr += field.getName().getLocalPart() + " = " + field.getValue() + "  ";
+                }
+                debugInfo += "\n" + fieldsStr;
+            }
+        }
+        return debugInfo;
     }
 
     private void handleError(Throwable e, String message) {
         if (message == null || message.length() < 1) {
-            messenger.accept(Labels.getString("SettingsPage.invalidLogin"));
+            authStatusChangeConsumer.accept(Labels.getString("LoginPage.invalidLogin"));
+            logger.error(Labels.getString("LoginPage.invalidLogin"));
         } else {
             int x = message.indexOf(nestedException);
             if (x >= 0) {
                 x += nestedException.length();
                 message = message.substring(x);
             }
-            messenger.accept(message.replace('\n', ' ').trim());
+            authStatusChangeConsumer.accept(message.replace('\n', ' ').trim());
+            logger.error(message);
         }
-        complete.accept(false);
-        logger.error(message);
-        logger.error("\n" + ExceptionUtil.getStackTraceString(e));
+        logger.debug("\n" + ExceptionUtil.getStackTraceString(e));
+    }
+
+    private String readErrorResponse(HttpURLConnection conn) throws IOException {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getErrorStream()))) {
+            StringBuilder response = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                response.append(line);
+            }
+            return response.toString();
+        }
     }
 }

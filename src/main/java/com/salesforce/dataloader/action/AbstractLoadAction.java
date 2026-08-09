@@ -28,19 +28,21 @@ package com.salesforce.dataloader.action;
 
 import com.salesforce.dataloader.action.progress.ILoaderProgress;
 import com.salesforce.dataloader.action.visitor.DAOLoadVisitor;
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.controller.Controller;
-import com.salesforce.dataloader.dao.DataAccessObject;
+import com.salesforce.dataloader.dao.DataAccessObjectInterface;
 import com.salesforce.dataloader.dao.DataAccessObjectFactory;
-import com.salesforce.dataloader.dao.DataReader;
+import com.salesforce.dataloader.dao.DataReaderInterface;
+import com.salesforce.dataloader.exception.BatchSizeLimitException;
 import com.salesforce.dataloader.exception.DataAccessObjectException;
 import com.salesforce.dataloader.exception.DataAccessObjectInitializationException;
 import com.salesforce.dataloader.exception.MappingInitializationException;
 import com.salesforce.dataloader.exception.OperationException;
 import com.salesforce.dataloader.exception.ParameterLoadException;
 import com.salesforce.dataloader.mapping.LoadMapper;
-import com.salesforce.dataloader.model.Row;
+import com.salesforce.dataloader.model.TableRow;
 import com.salesforce.dataloader.util.DAORowUtil;
+import com.salesforce.dataloader.util.LoadRateCalculator;
 import com.sforce.ws.ConnectionException;
 
 import java.util.List;
@@ -50,21 +52,21 @@ import java.util.List;
  * @since 6.0
  */
 abstract class AbstractLoadAction extends AbstractAction {
-
+    
     protected AbstractLoadAction(Controller controller, ILoaderProgress monitor)
             throws DataAccessObjectInitializationException {
         super(controller, monitor);
     }
 
     @Override
-    protected abstract DAOLoadVisitor createVisitor();
+    protected abstract DAOLoadVisitor createVisitor(LoadRateCalculator rateCalculator, boolean isFirstJob);
 
     @Override
-    protected void checkDao(DataAccessObject dao) throws DataAccessObjectInitializationException {
-        if (!(dao instanceof DataReader)) {
-            final String errMsg = getMessage("errorWrongDao", getConfig().getString(Config.DAO_TYPE),
+    protected void checkDao(DataAccessObjectInterface dao) throws DataAccessObjectInitializationException {
+        if (!(dao instanceof DataReaderInterface)) {
+            final String errMsg = getMessage("errorWrongDao", getConfig().getString(AppConfig.PROP_DAO_TYPE),
                     DataAccessObjectFactory.CSV_READ_TYPE + " or " + DataAccessObjectFactory.DATABASE_READ_TYPE,
-                    getConfig().getString(Config.OPERATION));
+                    getConfig().getString(AppConfig.PROP_OPERATION));
             getLogger().fatal(errMsg);
             throw new DataAccessObjectInitializationException(errMsg);
         }
@@ -77,18 +79,43 @@ abstract class AbstractLoadAction extends AbstractAction {
     protected boolean visit() throws DataAccessObjectException, ParameterLoadException, OperationException,
     ConnectionException {
 
-        final int loadBatchSize = this.getConfig().getLoadBatchSize();
-        final List<Row> daoRowList = getDao().readRowList(loadBatchSize);
+        final int loadBatchSize = this.getConfig().getCurrentSettingForMaxRowsInImportBatch();
+        final int daoRowNumBase = getDao().getCurrentRowNumber();
+        final List<TableRow> daoRowList = getDao().readTableRowList(loadBatchSize);
         if (daoRowList == null || daoRowList.size() == 0) return false;
-        for (final Row daoRow : daoRowList) {
-            if (!DAORowUtil.isValidRow(daoRow)) return false;
-            getVisitor().visit(daoRow);
+        int daoRowCount = 0;
+
+        for (final TableRow daoRow : daoRowList) {
+            if (!DAORowUtil.isValidTableRow(daoRow)) {
+                getVisitor().setRowConversionStatus(daoRowNumBase + daoRowCount++, 
+                        false);
+                return false;
+            }
+            boolean successfulVisit = false;
+            try {
+                successfulVisit = getVisitor().visit(daoRow);
+            } catch (BatchSizeLimitException ex) {
+                // retry the same row again
+                try {
+                    if (this.getConfig().isBulkV2APIEnabled()) {
+                        // BulkV2 completed a job.
+                        // Create a new visitor for a new job. However, it should use
+                        // the LoadRateCalculator instance from the current visitor.
+                        getLogger().info("Need to run multiple Bulkv2 API jobs to complete upload");
+                        setVisitor(this.createVisitor(this.getVisitor().getLoadRateCalculator(), false));
+                    }
+                    successfulVisit = getVisitor().visit(daoRow);
+                } catch (BatchSizeLimitException e) {
+                    getLogger().warn("row byte size is too large to process");
+                }
+            }
+            getVisitor().setRowConversionStatus(daoRowNumBase + daoRowCount++, successfulVisit);
         }
         return true;
     }
 
     @Override
-    protected void flush() throws OperationException, DataAccessObjectException {
+    protected void flush() throws OperationException, DataAccessObjectException, BatchSizeLimitException {
         getVisitor().flushRemaining();
     }
 
@@ -97,7 +124,7 @@ abstract class AbstractLoadAction extends AbstractAction {
         // ensure all field mappings are valid before data load
         ((LoadMapper)this.getController().getMapper()).verifyMappingsAreValid();
         // start the Progress Monitor
-        getMonitor().beginTask(getMessage("loading", getConfig().getString(Config.OPERATION)), getDao().getTotalRows());
+        getMonitor().beginTask(getMessage("loading", getConfig().getString(AppConfig.PROP_OPERATION)), getDao().getTotalRows());
         // set the starting row
         DAORowUtil.get().skipRowToStartOffset(getConfig(), getDao(), getMonitor(), !getConfig().isBulkAPIEnabled());
     }
@@ -108,12 +135,12 @@ abstract class AbstractLoadAction extends AbstractAction {
     }
 
     @Override
-    protected DataReader getDao() {
-        return (DataReader)super.getDao();
+    protected DataReaderInterface getDao() {
+        return (DataReaderInterface)super.getDao();
     }
 
     @Override
-    protected DAOLoadVisitor getVisitor() {
+    public DAOLoadVisitor getVisitor() {
         return (DAOLoadVisitor)super.getVisitor();
     }
 

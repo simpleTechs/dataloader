@@ -28,12 +28,15 @@ package com.salesforce.dataloader.process;
 import com.salesforce.dataloader.TestSetting;
 import com.salesforce.dataloader.TestVariant;
 import com.salesforce.dataloader.action.OperationInfo;
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.controller.Controller;
 import com.salesforce.dataloader.exception.DataAccessObjectException;
 import com.salesforce.dataloader.exception.DataAccessObjectInitializationException;
 import com.salesforce.dataloader.model.Row;
+import com.salesforce.dataloader.model.TableRow;
+
 import org.junit.Assert;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -54,6 +57,7 @@ import static org.junit.Assert.assertTrue;
  * @userstory Commenting existing data loader tests and uploading into QA force
  */
 @RunWith(Parameterized.class)
+@SuppressWarnings("unused")
 public class CsvHardDeleteTest extends ProcessTestBase {
 
     public CsvHardDeleteTest(Map<String, String> config) {
@@ -64,8 +68,11 @@ public class CsvHardDeleteTest extends ProcessTestBase {
     public static Collection<Object[]> getTestParameters() {
         return Arrays.asList(
                 TestVariant.forSettings(TestSetting.BULK_API_ENABLED),
+                TestVariant.forSettings(TestSetting.BULK_API_ENABLED, TestSetting.BULK_API_CACHE_DAO_UPLOAD_ENABLED),
                 TestVariant.forSettings(TestSetting.BULK_API_ENABLED, TestSetting.BULK_API_ZIP_CONTENT_ENABLED),
-                TestVariant.forSettings(TestSetting.BULK_API_ENABLED, TestSetting.BULK_API_SERIAL_MODE_ENABLED));
+                TestVariant.forSettings(TestSetting.BULK_API_ENABLED, TestSetting.BULK_API_SERIAL_MODE_ENABLED),
+                TestVariant.forSettings(TestSetting.BULK_V2_API_ENABLED)
+            );
     }
 
     /**
@@ -94,7 +101,7 @@ public class CsvHardDeleteTest extends ProcessTestBase {
         // attempt to hard delete 100 accounts as a user without the "Bulk API Hard Delete" user perm enabled
         final Map<String, String> argMap = getHardDeleteTestConfig(new AccountIdTemplateListener(100));
         // change the configured user to be the standard user (ie without the perm)
-        argMap.put(Config.USERNAME, getProperty("test.user.restricted"));
+        argMap.put(AppConfig.PROP_USERNAME, getProperty("test.user.restricted"));
 
         runProcessNegative(argMap, "You need the Bulk API Hard Delete user permission to permanently delete records.");
     }
@@ -137,7 +144,7 @@ public class CsvHardDeleteTest extends ProcessTestBase {
     }
 
     /**
-     * Hard Delete - Negative test. Uncheck Bull Api setting in data loader to verify that Hard Delete operation cannot
+     * Hard Delete - Negative test. Uncheck Bulk Api setting in data loader to verify that Hard Delete operation cannot
      * be done.
      */
     @Test
@@ -147,13 +154,14 @@ public class CsvHardDeleteTest extends ProcessTestBase {
 
         // set batch process parameters
         Map<String, String> argMap = getHardDeleteTestConfig(new AccountIdTemplateListener(1));
-        argMap.remove(Config.BULK_API_ENABLED);
+        argMap.remove(AppConfig.PROP_BULK_API_ENABLED);
+        argMap.remove(AppConfig.PROP_BULKV2_API_ENABLED);
         try {
             runProcess(argMap, 889);
             Assert.fail("hard delete should not succeed if bulk api is turned off");
         } catch (Exception e) {
             final String msg = e.getMessage();
-            final String expected = "java.lang.UnsupportedOperationException: Error instantiating operation hard_delete: could not instantiate class: null.";
+            final String expected = "Error instantiating operation hard_delete: could not instantiate class: null.";
             assertEquals("Wrong exception thrown when attempting to do hard delete with bulk api off : ", expected, msg);
         }
 
@@ -166,7 +174,7 @@ public class CsvHardDeleteTest extends ProcessTestBase {
         }
 
         @Override
-        public void updateRow(int idx, Row row) {
+        public void updateRow(int idx, TableRow row) {
             if (idx == 0)
                 row.put("ID", "abcde0123456789XYZ");
             else
@@ -215,7 +223,7 @@ public class CsvHardDeleteTest extends ProcessTestBase {
     public void testHardDeleteIDFromOtherObjectFails() throws Exception {
         // set batch process parameters
         Map<String, String> argMap = getHardDeleteTestConfig(new AccountIdTemplateListener(1));
-        argMap.put(Config.ENTITY, "Contact");
+        argMap.put(AppConfig.PROP_ENTITY, "Contact");
         Controller theController = runProcessWithErrors(argMap, 0, 1);
 
         // verify there were errors during operation
@@ -231,7 +239,7 @@ public class CsvHardDeleteTest extends ProcessTestBase {
         }
 
         @Override
-        public void updateRow(int idx, Row row) {
+        public void updateRow(int idx, TableRow row) {
             if (idx < this.contactIds.length)
                 row.put("ID", this.contactIds[idx]);
             else

@@ -28,6 +28,9 @@ package com.salesforce.dataloader.util;
 
 import java.util.Date;
 
+import org.apache.logging.log4j.Logger;
+
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.config.Messages;
 
 /**
@@ -40,44 +43,115 @@ public class LoadRateCalculator {
 
     // TODO: we can probably move all references to this code into a base ProgressMonitor class
     private Date startTime = null;
-    private int totalRecords;
+    private long totalRecordsAcrossAllJobs = 0;
+    private boolean started = false;
+    private long numSuccessesAcrossCompletedJobs = 0;
+    private long numErrorsAcrossCompletedJobs = 0;
+    private Logger logger;
+    private boolean isCalculateSubTaskInvoked = false;
 
-    public LoadRateCalculator() {}
-
-    public void start() {
-        this.startTime = new Date();
+    public LoadRateCalculator() {
+        logger = DLLogManager.getLogger(LoadRateCalculator.class);
     }
 
-    public void setNumRecords(int numRecords) {
-        this.totalRecords = numRecords;
+    public synchronized void start(int numRecords) {
+        if (numSuccessesAcrossCompletedJobs != 0) {
+            logger.debug("numSuccessesAcrossCompletedJobs = " + numSuccessesAcrossCompletedJobs);
+        }
+        if (numErrorsAcrossCompletedJobs != 0) {
+            logger.debug("numErrorsAcrossCompletedJobs = " + numErrorsAcrossCompletedJobs);
+        }
+        if (!started) {
+            started = true;
+            this.startTime = new Date();
+            this.totalRecordsAcrossAllJobs = numRecords;
+        }
     }
 
-    public String calculateSubTask(int numProcessed, int numErrors) {
+    public String calculateSubTask(long processedRecordsInJob, long numErrorsInJob) {
 
+        if (!isCalculateSubTaskInvoked) {
+            isCalculateSubTaskInvoked = true;
+            if (numSuccessesAcrossCompletedJobs != 0) {
+                logger.warn("calculateSubTask() called for the first time while numSuccessesAcrossCompletedJobs is " + numSuccessesAcrossCompletedJobs);
+            }
+            if (numErrorsAcrossCompletedJobs != 0) {
+                logger.warn("calculateSubTask() called for the first time while numErrorsAcrossCompletedJobs is " + numErrorsAcrossCompletedJobs);
+            }
+        }
         final Date currentLoadTime = new Date();
-        final int numSuccess = numProcessed - numErrors;
-        final long currentPerMin = numSuccess * 60 * 60;
-        long rate;
+        final long totalProcessedRecords = processedRecordsInJob + this.numErrorsAcrossCompletedJobs + this.numSuccessesAcrossCompletedJobs;
+        final long totalErrors =  this.numErrorsAcrossCompletedJobs + numErrorsInJob;
+        final long totalSuccesses = totalProcessedRecords - totalErrors;
+        //final long currentPerMin = numSuccess * 60 * 60;
+        long hourlyProcessingRate;
 
-        final long totalElapsed = currentLoadTime.getTime() - this.startTime.getTime();
-        if (totalElapsed == 0) {
-            rate = 0;
+        final long totalElapsedTimeInSec = (currentLoadTime.getTime() - this.startTime.getTime())/1000;
+        final long elapsedTimeInMinutes = totalElapsedTimeInSec / 60;
+        if (totalElapsedTimeInSec == 0) {
+            hourlyProcessingRate = 0;
         } else {
-            rate = currentPerMin / totalElapsed * 1000;
+            hourlyProcessingRate = (totalProcessedRecords * 60 * 60) / totalElapsedTimeInSec;
         }
 
-        long remainingSeconds = 0;
-        if (this.totalRecords > 0) {
-            // time_remaining = time_elapsed / percent_complete - time_elapsed
-            remainingSeconds = (long)(((double)this.totalRecords / numSuccess - 1.0) * totalElapsed) / 1000;
+        long remainingTimeInSec = 0;
+        long estimatedTotalTimeInSec = 0;
+        if (this.totalRecordsAcrossAllJobs > 0 && totalProcessedRecords > 0) {
+            // can estimate remaining time only if a few records are processed already.
+            estimatedTotalTimeInSec = (long) (totalElapsedTimeInSec * this.totalRecordsAcrossAllJobs / totalProcessedRecords);
+            remainingTimeInSec = estimatedTotalTimeInSec - totalElapsedTimeInSec;
+        }
+        
+        if (totalProcessedRecords > this.totalRecordsAcrossAllJobs) {
+            if (AppConfig.getCurrentConfig().getBoolean(AppConfig.PROP_DAO_SKIP_TOTAL_COUNT)) {
+                this.totalRecordsAcrossAllJobs = totalProcessedRecords;
+            } else {
+                // this is a problem. We should not be able to process more records than the
+                // total records across all jobs.
+                logger.warn("Calculation Error: the number of processed records (" 
+                        + totalProcessedRecords 
+                        + ") is greater than total records (" 
+                        + this.totalRecordsAcrossAllJobs
+                        + ") across all jobs");
+            }
+        }
+        if (remainingTimeInSec < 0) {
+            logger.warn("Remaining time calculation error.");
         }
 
-        final long mins = remainingSeconds / 60;
+        final long remainingTimeInMinutes = remainingTimeInSec / 60;
+        final long remainingSeconds = remainingTimeInSec - remainingTimeInMinutes * 60;
 
-        final long seconds = remainingSeconds - mins * 60;
-
-        return Messages.getMessage(getClass(), "processed", numProcessed, this.totalRecords, rate, mins, seconds,
-                numSuccess,
-                numErrors);
+        if (remainingTimeInMinutes < 0 || hourlyProcessingRate <= 0 || (remainingTimeInMinutes > 7 * 24 * 60)) { // processing time not calculated or imprecise
+            // LoadRateCalculator.processedTimeUnknown=Processed {0} of {1} total records. 
+            // There are {2} successes and {3} errors.
+            return Messages.getMessage(getClass(), "processedTimeUnknown", 
+                    totalProcessedRecords, // {0}
+                    this.totalRecordsAcrossAllJobs,  // {1}
+                    totalSuccesses,       // {2}
+                    totalErrors);       // {3}
+        }
+        // LoadRateCalculator.processed=Processed {0} of {1} total records in {8} minutes, {7} seconds. 
+        // There are {5} successes and {6} errors. \nRate: {2} records per hour. 
+        // Estimated time to complete: {3} minutes and {4} seconds. 
+        return Messages.getMessage(getClass(), "processed", 
+                totalProcessedRecords, // {0}
+                this.totalRecordsAcrossAllJobs,  // {1}
+                hourlyProcessingRate,    // {2}
+                remainingTimeInMinutes,  // {3}
+                remainingSeconds,        // {4}
+                totalSuccesses,       // {5}
+                totalErrors,       // {6}
+                totalElapsedTimeInSec - (60 * elapsedTimeInMinutes), // {7}
+                elapsedTimeInMinutes // {8}
+            );
+    }
+    
+    public void setNumSuccessesAcrossCompletedJobs(long num) {
+        this.numSuccessesAcrossCompletedJobs = num;
+    }
+    
+    public void setNumErrorsAcrossCompletedJobs(long num) {
+        this.numErrorsAcrossCompletedJobs = num;
     }
 }

@@ -34,6 +34,7 @@ import java.util.Map;
 
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -41,12 +42,14 @@ import org.junit.runners.Parameterized;
 import com.salesforce.dataloader.TestSetting;
 import com.salesforce.dataloader.TestVariant;
 import com.salesforce.dataloader.action.OperationInfo;
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.controller.Controller;
 import com.salesforce.dataloader.dao.csv.CSVFileReader;
 import com.salesforce.dataloader.dao.csv.CSVFileWriter;
 import com.salesforce.dataloader.model.NATextValue;
-import com.salesforce.dataloader.model.Row;
+import com.salesforce.dataloader.model.TableHeader;
+import com.salesforce.dataloader.model.TableRow;
+import com.salesforce.dataloader.util.AppUtil;
 import com.sforce.soap.partner.QueryResult;
 import com.sforce.soap.partner.SaveResult;
 import com.sforce.soap.partner.sobject.SObject;
@@ -86,8 +89,10 @@ public class NAProcessTest extends ProcessTestBase {
     @Parameterized.Parameters(name = "{0}")
     public static Collection<Object[]> getConfigGeneratorParams() {
         return Arrays.asList(
+                TestVariant.forSettings(TestSetting.BULK_API_DISABLED),
                 TestVariant.forSettings(TestSetting.BULK_API_ENABLED),
-                TestVariant.forSettings(TestSetting.BULK_API_DISABLED));
+                TestVariant.forSettings(TestSetting.BULK_API_ENABLED, TestSetting.BULK_API_CACHE_DAO_UPLOAD_ENABLED)
+            );
     }
 
     @Test
@@ -148,9 +153,10 @@ public class NAProcessTest extends ProcessTestBase {
         generateCsvWithNAField(nullFieldName, taskId);
         Map<String, String> argMap = getArgMap(operation);
         Controller controller;
-        if (!getController().getConfig().getBoolean(Config.BULK_API_ENABLED) && isDateField) {
+        AppConfig appConfig = getController().getAppConfig();
+        if (!appConfig.isBulkAPIEnabled() && !appConfig.isBulkV2APIEnabled() && isDateField) {
             controller = runProcess(argMap, true, null, 0, 0, 1, false);
-            String errorFile = controller.getConfig().getStringRequired(Config.OUTPUT_ERROR);
+            String errorFile = controller.getAppConfig().getStringRequired(AppConfig.PROP_OUTPUT_ERROR);
             String errorMessage = getCsvFieldValue(errorFile, "ERROR");
             assertEquals("unexpected error message",
                     "Error converting value to correct data type: Failed to parse date: #N/A", errorMessage);
@@ -159,7 +165,7 @@ public class NAProcessTest extends ProcessTestBase {
             int numUpdate = operation.equals(OperationInfo.update) ? 1 : 0;
             controller = runProcess(argMap, true, null, numInsert, numUpdate, 0, false);
             String actualNullFieldValue = getFieldValueAfterOperation(nullFieldName, controller);
-            String expectedNullFieldValue = getController().getConfig().getBoolean(Config.BULK_API_ENABLED) ? null : NATextValue.getInstance().toString();
+            String expectedNullFieldValue = getController().getAppConfig().getBoolean(AppConfig.PROP_BULK_API_ENABLED) ? null : NATextValue.getInstance().toString();
             assertEquals("unexpected field value", expectedNullFieldValue, actualNullFieldValue);
         }
     }
@@ -180,7 +186,7 @@ public class NAProcessTest extends ProcessTestBase {
     }
 
     private String getFieldValueAfterOperation(String nullFieldName, Controller controller) throws Exception {
-        String successFile = controller.getConfig().getStringRequired(Config.OUTPUT_SUCCESS);
+        String successFile = controller.getAppConfig().getStringRequired(AppConfig.PROP_OUTPUT_SUCCESS);
         String taskId = getCsvFieldValue(successFile, "ID");
         QueryResult result = getController().getPartnerClient().query("select " + nullFieldName + " from Task where Id='" + taskId + "'");
         assertEquals(1, result.getSize());
@@ -189,8 +195,8 @@ public class NAProcessTest extends ProcessTestBase {
 
     private Map<String, String> getArgMap(OperationInfo operation) {
         Map<String, String> argMap = getTestConfig(operation, CSV_FILE_PATH, getTestDataDir() + File.separator + "NAProcessTest.sdl", false);
-        argMap.put(Config.ENTITY, "Task");
-        argMap.remove(Config.EXTERNAL_ID_FIELD);
+        argMap.put(AppConfig.PROP_ENTITY, "Task");
+        argMap.remove(AppConfig.PROP_IDLOOKUP_FIELD);
         return argMap;
     }
 
@@ -201,7 +207,7 @@ public class NAProcessTest extends ProcessTestBase {
         task.setField("OwnerId", userId);
         task.setField("Subject", TASK_SUBJECT);
         task.setField(fieldToNullName, fieldToNullValue);
-        SaveResult[] result = getController().getPartnerClient().getClient().create(new SObject[] { task });
+        SaveResult[] result = getController().getPartnerClient().getConnection().create(new SObject[] { task });
         assertEquals(1, result.length);
         if (!result[0].getSuccess())
             Assert.fail("creation of task failed with error " + result[0].getErrors()[0].getMessage());
@@ -209,17 +215,17 @@ public class NAProcessTest extends ProcessTestBase {
     }
 
     private String getCsvFieldValue(String csvFile, String fieldName) throws Exception {
-        CSVFileReader reader = new CSVFileReader(csvFile, getController(), false);
+        CSVFileReader reader = new CSVFileReader(new File(csvFile), getController().getAppConfig(), true, false);
         reader.open();
         assertEquals(1, reader.getTotalRows());
-        String fieldValue = (String)reader.readRow().get(fieldName);
+        String fieldValue = (String)reader.readTableRow().get(fieldName);
         reader.close();
         return fieldValue;
     }
 
     private String getUserId() throws Exception {
         QueryResult result = getController().getPartnerClient().query(
-                "select id from user where username='" + getController().getConfig().getString(Config.USERNAME) + "'");
+                "select id from user where username='" + getController().getAppConfig().getString(AppConfig.PROP_USERNAME) + "'");
         assertEquals(1, result.getSize());
         return result.getRecords()[0].getId();
     }
@@ -247,7 +253,13 @@ public class NAProcessTest extends ProcessTestBase {
             assertTrue("Could not delete existing CSV file: " + CSV_FILE_PATH, deleteCsvFileOk);
         }
 
-        Row row = new Row();
+        ArrayList<String> headerLabelList = new ArrayList<String>();
+        headerLabelList.add("OwnerId");
+        headerLabelList.add("Subject");
+        if (id != null) headerLabelList.add("Id");
+        headerLabelList.add(nullFieldName);
+        TableHeader header = new TableHeader(headerLabelList);
+        TableRow row = new TableRow(header);
         row.put("OwnerId", userId);
         row.put("Subject", TASK_SUBJECT);
         row.put(nullFieldName, nullFieldValue);
@@ -255,18 +267,12 @@ public class NAProcessTest extends ProcessTestBase {
 
         CSVFileWriter writer = null;
         try {
-            writer = new CSVFileWriter(CSV_FILE_PATH, getController().getConfig());
+            writer = new CSVFileWriter(CSV_FILE_PATH, getController().getAppConfig(), AppUtil.COMMA);
             writer.open();
-            writer.setColumnNames(new ArrayList<String>(row.keySet()));
+            writer.setColumnNames(new ArrayList<String>(header.getColumns()));
             writer.writeRow(row);
         } finally {
             if (writer != null) writer.close();
         }
     }
-
-    @Override
-    public void cleanRecords() {
-        deleteSfdcRecords("Task", "Subject='" + TASK_SUBJECT + "'", 0);
-    }
-
 }

@@ -26,15 +26,27 @@
 
 package com.salesforce.dataloader.mapping;
 
-import java.util.*;
-import java.util.Map.Entry;
-
 import com.salesforce.dataloader.client.PartnerClient;
+import com.salesforce.dataloader.client.SObjectMetaDataClient;
 import com.salesforce.dataloader.exception.MappingInitializationException;
-import com.salesforce.dataloader.model.Row;
+import com.salesforce.dataloader.model.TableHeader;
+import com.salesforce.dataloader.model.TableRow;
+import com.salesforce.dataloader.util.AppUtil;
 import com.sforce.soap.partner.Field;
-import org.apache.log4j.Logger;
+
+import org.apache.logging.log4j.Logger;
+import com.salesforce.dataloader.util.DLLogManager;
+import org.springframework.util.LinkedCaseInsensitiveMap;
 import org.springframework.util.StringUtils;
+
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.StringTokenizer;
+import java.util.Map.Entry;
+import java.util.Set;
 
 /**
  * Mapper which maps field names for loading operations. Field names are mapped from dao (local) name to sfdc name.
@@ -44,9 +56,11 @@ import org.springframework.util.StringUtils;
  */
 public class LoadMapper extends Mapper {
 
-    private static final Logger logger = Logger.getLogger(Mapper.class);
-
-    public LoadMapper(PartnerClient client, Collection<String> columnNames, Field[] fields, String mappingFileName)
+    private static final Logger logger = DLLogManager.getLogger(Mapper.class);
+    private TableHeader localCompositeRowHeader = null;
+    private TableHeader sfdcRowHeader = null;
+    
+    public LoadMapper(SObjectMetaDataClient client, Collection<String> columnNames, Field[] fields, String mappingFileName)
             throws MappingInitializationException {
         super(client, columnNames, fields, mappingFileName);
     }
@@ -57,27 +71,117 @@ public class LoadMapper extends Mapper {
         String sfdc = (String)entry.getValue();
         if (isConstant(dao))
             putConstant(sfdc, dao);
-        else if (!hasDaoColumns() || hasDaoColumn(dao)) putMapping(dao, sfdc);
+        else if (!hasDaoColumns() || hasDaoColumn(dao)) putMapping(dao, sfdc, true);
     }
 
     public Map<String, String> getMappingWithUnmappedColumns(boolean includeUnmapped) {
-        final Map<String, String> result = new HashMap<String, String>(getMap());
-        if (includeUnmapped) {
-            for (String daoColumn : getDaoColumns()) {
-                if (getMapping(daoColumn) == null) result.put(daoColumn, null);
+        final Map<String, String> result = new LinkedCaseInsensitiveMap<String>();
+        Collection<String> candidateCols = getCompositeDAOColumns();
+        if (candidateCols == null || candidateCols.isEmpty()) {
+            // no compositions yet
+            candidateCols = this.getDaoColumns();
+        }
+        // get mappings in the same order as DAO column order
+        for (String daoColumn : candidateCols) {
+            String mapping = getMapping(daoColumn, false, true);
+            if (includeUnmapped || mapping != null) {
+                result.put(daoColumn, mapping);
+            }
+        }
+        
+        // Make sure to not miss existing mappings even if they are not in DAO.
+        for (Map.Entry<String, String> currentMapEntry : getMap().entrySet()) {
+            if (!result.containsKey(currentMapEntry.getKey())) {
+                result.put(currentMapEntry.getKey(), currentMapEntry.getValue());
             }
         }
         return result;
     }
 
-    public Row mapData(Row localRow) {
-        Row mappedData = new Row();
-        for (Map.Entry<String, Object> entry : localRow.entrySet()) {
-            String sfdcName = getMapping(entry.getKey());
-            if (StringUtils.hasText(sfdcName)) {
-                mappedData.put(sfdcName, entry.getValue());
+    private void initializeHeaders() {
+        Map<String, String> currentMappings = getMappingWithUnmappedColumns(false);
+        this.localCompositeRowHeader = new TableHeader(new ArrayList<String>(currentMappings.keySet()));
+        ArrayList<String> sfdcFieldList = new ArrayList<String>();
+        for (String localCompositeCol : currentMappings.keySet()) {
+            String sfdcNameList = getMapping(localCompositeCol, true, true);
+            if (StringUtils.hasText(sfdcNameList)) {
+                String sfdcNameArray[] = sfdcNameList.split(AppUtil.COMMA);
+                for (String sfdcName : sfdcNameArray) {
+                    sfdcFieldList.add(sfdcName.trim());
+                }
+            }
+        }
+        Map<String, String> constantsMap = getConstantsMap();
+        for (String sfdcNameList : constantsMap.keySet()) {
+            String sfdcNameArray[] = sfdcNameList.split(AppUtil.COMMA);
+            for (String sfdcName : sfdcNameArray) {
+                sfdcFieldList.add(sfdcName.trim());
+            }
+        }
+        this.sfdcRowHeader = new TableHeader(sfdcFieldList);
+    }
+    
+    public TableRow mapData(TableRow localRow, boolean firstRow) {
+        if (firstRow) {
+            initializeHeaders();
+        }
+        Set<String> compositeDAOCols = this.getCompositeDAOColumns();
+        HashMap<String, Object[]> compositeColValueMap = new HashMap<String, Object[]>();
+        HashMap<String, Integer> compositeColSizeMap = this.getCompositeColSizeMap();
+        for (String compositeCol : compositeDAOCols) {
+            Integer compositeColSize = compositeColSizeMap.get(compositeCol);
+            if (compositeColSize == null) {
+                logger.warn("Invalid composite column : " + compositeCol);
+                StringTokenizer st = new StringTokenizer(compositeCol, AppUtil.COMMA);
+                compositeColSize = Integer.valueOf(st.countTokens());
+            }
+            compositeColValueMap.put(compositeCol, new Object[compositeColSize]);
+        }
+        
+        HashMap<String, Integer> daoColPositionMap = this.getDaoColPositionInCompositeColMap();
+        HashMap<String, String> daoColToCompositeColMap = this.getDaoColToCompositeColMap();
+        for (String daoCol : localRow.getHeader().getColumns()) {
+            String compositeColName = daoColToCompositeColMap.get(daoCol);
+            if (compositeColName == null) {
+                continue; // DAO column is not mapped
+            }
+            Object[] compositeColValueArray = compositeColValueMap.get(compositeColName);
+            Integer positionInCompositeCol = daoColPositionMap.get(daoCol);
+            Object daoColVal = localRow.get(daoCol);
+            if (compositeColValueArray.length > 1
+                    && daoColVal != null
+                    && !daoColVal.getClass().equals(String.class)) {
+                // composite DAO column has a non-String class. Ignore composition
+                if (positionInCompositeCol == 0) {
+                    compositeColValueArray[0] = daoColVal;
+                } else {
+                    daoColToCompositeColMap.remove(daoCol);
+                    daoColPositionMap.remove(daoCol);
+                }
+            } else { // dao column value is of type String
+                compositeColValueArray[positionInCompositeCol] = daoColVal;
+            }
+        }
+        
+        TableRow localCompositeRow = new TableRow(this.localCompositeRowHeader);
+        for (String compositeCol : compositeDAOCols) {
+            Object[] compositeColValueArray = compositeColValueMap.get(compositeCol);
+            Object compositeColValue = compositeColValueArray[0];
+            for (int i = 1; i < compositeColValueArray.length; i++) {
+                compositeColValue += AppUtil.COMMA + " " + compositeColValueArray[i];
+            }
+            localCompositeRow.put(compositeCol, compositeColValue);
+        }
+        TableRow mappedData = new TableRow(this.sfdcRowHeader);
+        for (String localCompositeRowElement : localCompositeRowHeader.getColumns()) {
+            String sfdcNameList = getMapping(localCompositeRowElement, true, true);
+            if (StringUtils.hasText(sfdcNameList)) {
+                String sfdcNameArray[] = sfdcNameList.split(AppUtil.COMMA);
+                for (String sfdcName : sfdcNameArray) {
+                    mappedData.put(sfdcName.trim(), localCompositeRow.get(localCompositeRowElement));
+                }
             } else {
-                logger.info("Mapping for field " + entry.getKey() + " will be ignored since destination column is empty");
+                logger.info("Mapping for field " + localCompositeRowElement + " will be ignored since destination column is empty");
             }
         }
         mapConstants(mappedData);
@@ -86,13 +190,46 @@ public class LoadMapper extends Mapper {
 
     public void verifyMappingsAreValid() throws MappingInitializationException {
         for (Map.Entry<String, String> entry : getMappingWithUnmappedColumns(false).entrySet()) {
-            String sfdcName = entry.getValue();
-            if(StringUtils.hasText(sfdcName)) {
-                final Field f = getClient().getField(sfdcName);
-                if (f == null)
-                    throw new MappingInitializationException("Field mapping is invalid: " + entry.getKey() + " => " + sfdcName);
+            String sfdcNameList = entry.getValue();
+            if(StringUtils.hasText(sfdcNameList)) {
+                String sfdcNameArray[] = sfdcNameList.split(AppUtil.COMMA);
+                for (String sfdcName : sfdcNameArray) {
+                    final Field f = getClient().getField(sfdcName.trim());
+                    if (f == null)
+                        throw new MappingInitializationException("Field mapping is invalid: " + entry.getKey() + " => " + sfdcName);
+                }
             }
         }
     }
-
+    
+    public List<String> getMappedDaoColumns() {
+        Map<String, String> possibleMappings = this.getMappingWithUnmappedColumns(true);
+        ArrayList<String> mappedColList = new ArrayList<String>();
+        for (String daoCol : possibleMappings.keySet()) {
+            String mappedName = this.map.get(daoCol);
+            if (mappedName != null) {
+                if (mappedName.contains(AppUtil.COMMA)) {
+                    String[] mappedNameList = mappedName.split(AppUtil.COMMA);
+                    for (int i=0; i<mappedNameList.length; i++) {
+                        mappedColList.add(mappedNameList[i]);
+                    }
+                } else {
+                    mappedColList.add(daoCol);
+                }
+            }
+        }
+        return mappedColList;
+    }
+    
+    public boolean hasDaoColumn(String localNameList) {
+        StringTokenizer st = new StringTokenizer(localNameList, AppUtil.COMMA);
+        while(st.hasMoreElements()) {
+            String v = st.nextToken();
+            v = v.trim();
+            if (!this.daoColumnNames.containsKey(v)) {
+                return false;
+            }
+        }
+        return true;
+    }
 }

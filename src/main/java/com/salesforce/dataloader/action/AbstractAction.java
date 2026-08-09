@@ -27,25 +27,30 @@
 package com.salesforce.dataloader.action;
 
 import java.util.ArrayList;
-import java.util.LinkedList;
 import java.util.List;
 
-import org.apache.log4j.Logger;
-
+import org.apache.logging.log4j.Logger;
+import com.salesforce.dataloader.util.DLLogManager;
+import com.salesforce.dataloader.util.LoadRateCalculator;
 import com.salesforce.dataloader.action.progress.ILoaderProgress;
 import com.salesforce.dataloader.action.visitor.IVisitor;
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.config.Messages;
 import com.salesforce.dataloader.controller.Controller;
-import com.salesforce.dataloader.dao.DataAccessObject;
-import com.salesforce.dataloader.dao.DataWriter;
+import com.salesforce.dataloader.dao.DataAccessObjectInterface;
+import com.salesforce.dataloader.dao.DataWriterInterface;
 import com.salesforce.dataloader.dao.csv.CSVFileWriter;
+import com.salesforce.dataloader.exception.BatchSizeLimitException;
 import com.salesforce.dataloader.exception.DataAccessObjectException;
 import com.salesforce.dataloader.exception.DataAccessObjectInitializationException;
+import com.salesforce.dataloader.exception.ExtractExceptionOnServer;
+import com.salesforce.dataloader.exception.HttpClientTransportException;
 import com.salesforce.dataloader.exception.LoadException;
+import com.salesforce.dataloader.exception.LoadExceptionOnServer;
 import com.salesforce.dataloader.exception.MappingInitializationException;
 import com.salesforce.dataloader.exception.OperationException;
 import com.salesforce.dataloader.exception.ParameterLoadException;
+import com.salesforce.dataloader.util.AppUtil;
 import com.sforce.async.AsyncApiException;
 import com.sforce.soap.partner.fault.ApiFault;
 import com.sforce.ws.ConnectionException;
@@ -60,17 +65,19 @@ abstract class AbstractAction implements IAction {
 
     private final ILoaderProgress monitor;
     private final Controller controller;
-    private final IVisitor visitor;
+    private IVisitor visitor;
 
-    private final DataWriter successWriter;
-    private final DataWriter errorWriter;
-    private final DataAccessObject dao;
+    protected DataWriterInterface successWriter;
+    protected DataWriterInterface errorWriter;
+    private final DataAccessObjectInterface dao;
 
     private final Logger logger;
+    private boolean enableRetries;
+    private int maxRetries;
 
     protected AbstractAction(Controller controller, ILoaderProgress monitor)
             throws DataAccessObjectInitializationException {
-        this.logger = Logger.getLogger(getClass());
+        this.logger = DLLogManager.getLogger(getClass());
         this.monitor = monitor;
         this.controller = controller;
         checkDao(getController().getDao());
@@ -82,17 +89,31 @@ abstract class AbstractAction implements IAction {
             this.successWriter = null;
             this.errorWriter = null;
         }
-        this.visitor = createVisitor();
+        // Let the IVisitor instance create LoadRateCalculator instance for the first job by passing
+        // null as the first argument.
+        this.visitor = createVisitor(null, true);
+        int retries = -1;
+        this.enableRetries = controller.getAppConfig().getBoolean(AppConfig.PROP_ENABLE_RETRIES);
+        if (this.enableRetries) {
+            try {
+                // limit the number of max retries in case limit is exceeded
+                retries = Math.min(AppConfig.MAX_RETRIES_LIMIT, controller.getAppConfig().getInt(AppConfig.PROP_MAX_RETRIES));
+            } catch (ParameterLoadException e) {
+                retries = AppConfig.DEFAULT_MAX_RETRIES;
+            }
+        }
+        this.maxRetries = retries;
     }
 
     /** This method should throw an error if the data access object is configured incorrectly */
-    protected abstract void checkDao(DataAccessObject dao) throws DataAccessObjectInitializationException;
+    protected abstract void checkDao(DataAccessObjectInterface dao) throws DataAccessObjectInitializationException;
 
     /** @return a new IVisitor object to be used by this action */
-    protected abstract IVisitor createVisitor();
+    protected abstract IVisitor createVisitor(LoadRateCalculator rateCalculator, boolean isFirstJob);
 
-    /** flushes any remaining records to or from the dao */
-    protected abstract void flush() throws OperationException, DataAccessObjectException;
+    /** flushes any remaining records to or from the dao 
+     * @throws BatchSizeLimitException */
+    protected abstract void flush() throws OperationException, DataAccessObjectException, BatchSizeLimitException;
 
     /** subclasses should do operation specific initialization here */
     protected abstract void initOperation() throws DataAccessObjectInitializationException, OperationException,
@@ -117,9 +138,31 @@ abstract class AbstractAction implements IAction {
 
     @Override
     public final void execute() {
+        List<Exception> exceptions = null;
+        for (int numAttempts = 0; numAttempts < this.maxRetries; numAttempts++) {
+                exceptions = executeOperation();
+                boolean doAttemptAgain = false;
+                if (exceptions != null && exceptions.size() > 0) {
+                    for (Exception e : exceptions) {
+                        if (shouldRetryOperation(e, numAttempts)) {
+                            doAttemptAgain = true;
+                            break;
+                        }
+                    }
+                }
+                if (!doAttemptAgain) {
+                    break; // stop the loop
+                }
+        }
+        if (exceptions != null && exceptions.size() > 0) {
+            exceptions.forEach(this::handleException);
+        }
+    }
+    
+    private List<Exception> executeOperation() {
         List<Exception> exceptions = new ArrayList<>();
         try {
-            getLogger().info(getMessage("loading", getConfig().getString(Config.OPERATION)));
+            getLogger().info(getMessage("loading", getConfig().getString(AppConfig.PROP_OPERATION)));
             getDao().open();
             initOperation();
             if (writeStatus()) {
@@ -129,12 +172,11 @@ abstract class AbstractAction implements IAction {
             }
 
             while (!getMonitor().isCanceled() && visit()) {}
-
-
+            
         } catch (final Exception e) {
             exceptions.add(e);
         } finally {
-            try{
+            try {
                 flush(); //make sure we don't early abort here
             } catch (Exception e) {
                 exceptions.add(e);
@@ -145,10 +187,13 @@ abstract class AbstractAction implements IAction {
                 exceptions.add(e);
             }
             try {
+                if (this.errorWriter != null) {
+                    getMonitor().setNumberRowsWithError(this.errorWriter.getCurrentRowNumber());
+                }
                 //if no exceptions occurred then display success/error
                 if (exceptions.size() == 0) {
                     final Object[] args = {String.valueOf(getVisitor().getNumberSuccesses()),
-                            getConfig().getString(Config.OPERATION), String.valueOf(getVisitor().getNumberErrors())};
+                            getConfig().getString(AppConfig.PROP_OPERATION), String.valueOf(getVisitor().getNumberErrors())};
 
                     // set the monitor to done
                     if (getMonitor().isCanceled()) {
@@ -160,34 +205,77 @@ abstract class AbstractAction implements IAction {
             } catch (Exception e){
                 exceptions.add(e);
             }
-            //handle each recorded exception
-            if (exceptions.size() > 0){
-                exceptions.forEach(this::handleException);
+        }
+        return exceptions;
+    }
+    
+    private boolean shouldRetryOperation(Exception e, int numAttempts) {
+        if (e instanceof HttpClientTransportException
+                || e instanceof ExtractExceptionOnServer
+                || e instanceof LoadExceptionOnServer
+                || e instanceof ConnectionException) {
+            if (numAttempts < this.maxRetries-1 
+                    && this.enableRetries
+                    && controller.getAppConfig().getOperationInfo() != OperationInfo.insert) {
+                // loop only if less than MAX_RETRIES and operation is not insert
+                logger.warn("Encountered an error on server when performing "
+                        + controller.getAppConfig().getString(AppConfig.PROP_OPERATION) 
+                        + " on attempt " 
+                        + numAttempts );
+                logger.warn(e.getMessage());
+                retrySleep(numAttempts);
+                return true;
             }
+        }
+        return false;
+    }
+    
+    /**
+     * @param operationName
+     */
+    private void retrySleep(int retryNum) {
+        int sleepSecs;
+        try {
+            sleepSecs = controller.getAppConfig().getInt(AppConfig.PROP_MIN_RETRY_SLEEP_SECS);
+        } catch (ParameterLoadException e1) {
+            sleepSecs = AppConfig.DEFAULT_MIN_RETRY_SECS;
+        }
+        // sleep between retries is based on the retry attempt #. Sleep for longer periods with each retry
+        sleepSecs = sleepSecs + (retryNum * 10); // sleep for MIN_RETRY_SLEEP_SECS + 10, 20, 30, etc.
+
+        logger.info(Messages.getFormattedString("Client.retryOperation", 
+                new String[]{Integer.toString(retryNum + 1),
+                getController().getAppConfig().getString(AppConfig.PROP_OPERATION), 
+                Integer.toString(sleepSecs)}));
+        try {
+            Thread.sleep(sleepSecs * 1000);
+        } catch (InterruptedException e) { // ignore
         }
     }
 
     private void closeAll() {
         getDao().close();
-        if (writeStatus()) {
-            getSuccessWriter().close();
-            getErrorWriter().close();
+        if (this.successWriter != null) {
+            this.successWriter.close();
+        }
+        if (this.errorWriter != null) {
+            this.errorWriter.close();
         }
     }
 
-    protected Config getConfig() {
-        return getController().getConfig();
+    protected AppConfig getConfig() {
+        return getController().getAppConfig();
     }
 
     protected Controller getController() {
         return this.controller;
     }
 
-    protected DataAccessObject getDao() {
+    protected DataAccessObjectInterface getDao() {
         return this.dao;
     }
 
-    protected DataWriter getErrorWriter() {
+    protected DataWriterInterface getErrorWriter() {
         return this.errorWriter;
     }
 
@@ -204,18 +292,28 @@ abstract class AbstractAction implements IAction {
         return this.monitor;
     }
 
-    protected DataWriter getSuccessWriter() {
+    protected DataWriterInterface getSuccessWriter() {
         return this.successWriter;
     }
 
-    protected IVisitor getVisitor() {
+    public IVisitor getVisitor() {
         return this.visitor;
+    }
+    
+    protected void setVisitor(IVisitor newVisitor) {
+        this.visitor = newVisitor;
     }
 
     protected void handleException(Exception e) {
         String errMsg = e.getMessage();
         if (e instanceof ApiFault) {
-            errMsg = ((ApiFault)e).getExceptionMessage();
+            ApiFault apiFault = (ApiFault) e;
+            errMsg = apiFault.getExceptionMessage();
+            if (apiFault.getExceptionCode() != null &&
+                "INVALID_SESSION_ID".equals(apiFault.getExceptionCode().toString())) {
+                getLogger().warn("OAuth session expired (INVALID_SESSION_ID). Logging out user.");
+                getController().logout();
+            }
         } else if (e instanceof AsyncApiException) {
             errMsg = ((AsyncApiException)e).getExceptionMessage();
         }
@@ -227,54 +325,74 @@ abstract class AbstractAction implements IAction {
      * @return Error Writer
      * @throws DataAccessObjectInitializationException
      */
-    private DataWriter createErrorWriter() throws DataAccessObjectInitializationException {
-        final String filename = getConfig().getString(Config.OUTPUT_ERROR);
+    public DataWriterInterface createErrorWriter() throws DataAccessObjectInitializationException {
+        final String filename = getConfig().getString(AppConfig.PROP_OUTPUT_ERROR);
         if (filename == null || filename.length() == 0)
             throw new DataAccessObjectInitializationException(getMessage("errorMissingErrorFile"));
         // TODO: Make sure that specific DAO is not mentioned: use DataReader, DataWriter, or DataAccessObject
-        return new CSVFileWriter(filename, getConfig());
+        this.errorWriter = new CSVFileWriter(filename, getConfig(), AppUtil.COMMA);
+        return this.errorWriter;
     }
 
     /**
      * @return Success Writer
      * @throws DataAccessObjectInitializationException
      */
-    private DataWriter createSuccesWriter() throws DataAccessObjectInitializationException {
-        final String filename = getConfig().getString(Config.OUTPUT_SUCCESS);
+    public DataWriterInterface createSuccesWriter() throws DataAccessObjectInitializationException {
+        final String filename = getConfig().getString(AppConfig.PROP_OUTPUT_SUCCESS);
         if (filename == null || filename.length() == 0)
             throw new DataAccessObjectInitializationException(getMessage("errorMissingSuccessFile"));
         // TODO: Make sure that specific DAO is not mentioned: use DataReader, DataWriter, or DataAccessObject
-        return new CSVFileWriter(filename, getConfig());
+        this.successWriter = new CSVFileWriter(filename, getConfig(), AppUtil.COMMA);
+        return this.successWriter;
     }
 
-    private void openErrorWriter(List<String> headers) throws OperationException {
-        headers = new LinkedList<String>(headers);
+    public void openErrorWriter(List<String> headers) throws OperationException {
+        headers = new ArrayList<String>(headers);
+        AppConfig appConfig = this.controller.getAppConfig();
 
-        // add the ERROR column
-        headers.add(Config.ERROR_COLUMN_NAME);
+        if (appConfig.isBulkV2APIEnabled()
+        	&& !appConfig.getString(AppConfig.PROP_OPERATION).equals(OperationInfo.extract.name())
+        	&& !appConfig.getString(AppConfig.PROP_OPERATION).equals(OperationInfo.extract_all.name())) {
+            headers.add(0, AppConfig.ID_COLUMN_NAME);
+        	headers.add(1, AppConfig.ERROR_COLUMN_NAME);
+        } else {
+	        // add the ERROR column
+	        headers.add(AppConfig.ERROR_COLUMN_NAME);
+        }
         try {
             getErrorWriter().open();
             getErrorWriter().setColumnNames(headers);
         } catch (final DataAccessObjectInitializationException e) {
             throw new OperationException(
-                    getMessage("errorOpeningErrorFile", getConfig().getString(Config.OUTPUT_ERROR)), e);
+                    getMessage("errorOpeningErrorFile", getConfig().getString(AppConfig.PROP_OUTPUT_ERROR)), e);
         }
     }
 
-    private void openSuccessWriter(List<String> headers) throws LoadException {
-        headers = new LinkedList<String>(headers);
+    public void openSuccessWriter(List<String> headers) throws LoadException {
+        headers = new ArrayList<String>(headers);
+        AppConfig appConfig = this.controller.getAppConfig();
 
         // add the ID column if not there already
-        if (!Config.ID_COLUMN_NAME.equals(headers.get(0))) {
-            headers.add(0, Config.ID_COLUMN_NAME);
+        if (appConfig.isBulkV2APIEnabled()
+        	&& !appConfig.getString(AppConfig.PROP_OPERATION).equals(OperationInfo.extract.name())
+        	&& !appConfig.getString(AppConfig.PROP_OPERATION).equals(OperationInfo.extract_all.name())) {
+            if (headers.size() == 0 || !AppConfig.ID_COLUMN_NAME.equals(headers.get(0))) {
+                headers.add(0, AppConfig.ID_COLUMN_NAME);
+            }
+            headers.add(1, AppConfig.STATUS_COLUMN_NAME_IN_BULKV2);
+        } else {
+	        if (!AppConfig.ID_COLUMN_NAME.equals(headers.get(0))) {
+	            headers.add(0, AppConfig.ID_COLUMN_NAME);
+	        }
+	        headers.add(AppConfig.STATUS_COLUMN_NAME);
         }
-        headers.add(Config.STATUS_COLUMN_NAME);
         try {
             getSuccessWriter().open();
             getSuccessWriter().setColumnNames(headers);
         } catch (final DataAccessObjectInitializationException e) {
             throw new LoadException(
-                    getMessage("errorOpeningSuccessFile", getConfig().getString(Config.OUTPUT_SUCCESS)), e);
+                    getMessage("errorOpeningSuccessFile", getConfig().getString(AppConfig.PROP_OUTPUT_SUCCESS)), e);
         }
     }
 

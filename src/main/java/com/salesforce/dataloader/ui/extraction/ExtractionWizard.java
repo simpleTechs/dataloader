@@ -29,12 +29,15 @@ package com.salesforce.dataloader.ui.extraction;
 import java.io.*;
 import java.lang.reflect.InvocationTargetException;
 
-import org.apache.log4j.Logger;
+import org.apache.logging.log4j.Logger;
+import com.salesforce.dataloader.util.DLLogManager;
+
 import org.eclipse.jface.dialogs.ProgressMonitorDialog;
+import org.eclipse.jface.wizard.WizardPage;
 import org.eclipse.swt.SWT;
 
 import com.salesforce.dataloader.action.OperationInfo;
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.controller.Controller;
 import com.salesforce.dataloader.ui.*;
 
@@ -43,7 +46,7 @@ import com.salesforce.dataloader.ui.*;
  */
 public class ExtractionWizard extends BaseWizard {
 
-    private static final Logger logger = Logger.getLogger(ExtractionWizard.class);
+    private static final Logger logger = DLLogManager.getLogger(ExtractionWizard.class);
 
     /**
      * ExtractionWizard constructor
@@ -57,13 +60,13 @@ public class ExtractionWizard extends BaseWizard {
     }
 
     @Override
-    protected ExtractionPage setPages() {
+    protected WizardPage setPages() {
         final Controller controller = getController();
         addPage(new ExtractionDataSelectionPage(controller ));
         ExtractionPage soqlPage = new ExtractionSOQLPage(controller);
         addPage(soqlPage);
-        ExtractionPage finishPage = soqlPage;
-        if (getConfig().getBoolean(Config.ENABLE_EXTRACT_STATUS_OUTPUT)) {
+        WizardPage finishPage = soqlPage;
+        if (getConfig().getBoolean(AppConfig.PROP_ENABLE_EXTRACT_STATUS_OUTPUT)) {
             //need to reference the finish page for performFinish()
             finishPage = new ExtractionFinishPage(controller);
             addPage(finishPage);
@@ -72,8 +75,8 @@ public class ExtractionWizard extends BaseWizard {
     }
 
     @Override
-    protected ExtractionPage getFinishPage() {
-        return (ExtractionPage)super.getFinishPage();
+    protected OperationPage getFinishPage() {
+        return (OperationPage)super.getFinishPage();
     }
 
     private boolean validateExtractionPath(String filePath) {
@@ -118,11 +121,11 @@ public class ExtractionWizard extends BaseWizard {
 
     @Override
     public boolean performFinish() {
-        if (!validateExtractionPath(getConfig().getString(Config.DAO_NAME))) {
+        if (!validateExtractionPath(getConfig().getString(AppConfig.PROP_DAO_NAME))) {
             return false;
         }
 
-        if (!getFinishPage().finishPage()) {
+        if (!getFinishPage().finishAllowed()) {
             return false;
         }
 
@@ -146,11 +149,13 @@ public class ExtractionWizard extends BaseWizard {
             return false;
         }
 
-        return true;
+        return getController().isLastOperationSuccessful() && closeWizardPagePostSuccessfulFinish();
     }
 
     @Override
-    protected SettingsPage createSettingsPage() {
-        return new ExtractionSettingsPage(getController());
+    protected LoginPage createLoginPage() {
+        LoginPage loginPage = new LoginPage(getController());
+        loginPage.setNextPageName(ExtractionDataSelectionPage.class.getSimpleName());
+        return loginPage;
     }
 }

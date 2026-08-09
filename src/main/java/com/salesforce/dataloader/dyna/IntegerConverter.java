@@ -26,6 +26,11 @@
 
 package com.salesforce.dataloader.dyna;
 
+import java.text.DecimalFormat;
+import java.text.NumberFormat;
+import java.text.ParseException;
+import java.util.Locale;
+
 import org.apache.commons.beanutils.ConversionException;
 import org.apache.commons.beanutils.Converter;
 
@@ -39,30 +44,7 @@ import org.apache.commons.beanutils.Converter;
 public final class IntegerConverter implements Converter {
 
     public IntegerConverter() {
-
-        this.defaultValue = null;
-        this.useDefault = false;
-
     }
-
-    public IntegerConverter(Object defaultValue) {
-
-        this.defaultValue = defaultValue;
-        this.useDefault = true;
-
-    }
-
-    // ----------------------------------------------------- Instance Variables
-
-    /**
-     * The default value specified to our Constructor, if any.
-     */
-    private Object defaultValue = null;
-
-    /**
-     * Should we return the default value on conversion errors?
-     */
-    private boolean useDefault = true;
 
     // --------------------------------------------------------- Public Methods
 
@@ -77,6 +59,7 @@ public final class IntegerConverter implements Converter {
      *                if conversion cannot be performed successfully
      */
     @Override
+    @SuppressWarnings({ "rawtypes", "unchecked" })
     public Object convert(Class type, Object value) {
         if (value == null || String.valueOf(value).length() == 0) {
             return null;
@@ -85,17 +68,16 @@ public final class IntegerConverter implements Converter {
         if (value instanceof Integer) {
             return (value);
         } else if (value instanceof Number) {
-            return new Integer(((Number)value).intValue());
+            return Integer.valueOf(((Number)value).intValue());
         }
-
+        
         try {
-            return (new Integer(value.toString()));
-        } catch (Exception e) {
-            if (useDefault) {
-                return (defaultValue);
-            } else {
-                throw new ConversionException(e);
-            }
+            NumberFormat numFormat = DecimalFormat.getIntegerInstance(Locale.getDefault());
+            numFormat.setParseIntegerOnly(true);
+            Number number = numFormat.parse(value.toString());
+            return Integer.valueOf(number.intValue());
+        } catch (ParseException e) {
+            throw new ConversionException(e);
         }
     }
 

@@ -27,55 +27,92 @@
 package com.salesforce.dataloader.action.visitor;
 
 import com.salesforce.dataloader.action.progress.ILoaderProgress;
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.controller.Controller;
-import com.salesforce.dataloader.dao.DataWriter;
+import com.salesforce.dataloader.dao.DataWriterInterface;
 import com.salesforce.dataloader.exception.DataAccessObjectException;
 import com.salesforce.dataloader.mapping.Mapper;
-import com.salesforce.dataloader.model.Row;
+import com.salesforce.dataloader.model.TableRow;
 import com.salesforce.dataloader.util.LoadRateCalculator;
-import org.apache.log4j.Logger;
+import org.apache.logging.log4j.Logger;
+
+import java.io.InputStream;
+import java.util.Map;
+
+import com.salesforce.dataloader.util.DLLogManager;
 
 public abstract class AbstractVisitor implements IVisitor {
 
     private final Logger logger;
 
-    private final Controller controller;
+    protected final Controller controller;
     private final ILoaderProgress monitor;
-    private final DataWriter successWriter;
-    private final DataWriter errorWriter;
-    private int errors;
-    private int successes;
-    private final LoadRateCalculator rateCalculator;
+    private DataWriterInterface successWriter;
+    private DataWriterInterface errorWriter;
+    private long errors = 0;
+    private long successes = 0;
+    private LoadRateCalculator rateCalculator;
 
-    public AbstractVisitor(Controller controller, ILoaderProgress monitor, DataWriter successWriter,
-            DataWriter errorWriter) {
-        this.logger = Logger.getLogger(getClass());
+    public AbstractVisitor(Controller controller, ILoaderProgress monitor, DataWriterInterface successWriter,
+            DataWriterInterface errorWriter) {
+        this(controller, monitor, successWriter, errorWriter, null);
+    }
+    
+    public AbstractVisitor(Controller controller, ILoaderProgress monitor, DataWriterInterface successWriter,
+            DataWriterInterface errorWriter, LoadRateCalculator rateCalculator) {
+        this.logger = DLLogManager.getLogger(getClass());
         this.controller = controller;
         this.monitor = monitor;
         this.successWriter = successWriter;
         this.errorWriter = errorWriter;
-        this.rateCalculator = new LoadRateCalculator();
+        if (rateCalculator == null) {
+            this.rateCalculator = new LoadRateCalculator();
+        } else {
+            this.rateCalculator = rateCalculator;
+        }
+    }
+    
+    public LoadRateCalculator getLoadRateCalculator() {
+        return this.rateCalculator;
     }
 
     protected abstract boolean writeStatus();
+    
+    protected void setSuccessWriter(DataWriterInterface successWriter) {
+        this.successWriter = successWriter;
+    }
+    protected void setErrorWriter(DataWriterInterface errorWriter) {
+        this.errorWriter = errorWriter;
+    }
 
     protected void addSuccess() {
         this.successes++;
     }
+    
+    protected void addErrors() {
+        this.errors++;
+    }
+    
+    protected void setSuccesses(long num) {
+    	this.successes = num;
+    }
+    
+    protected void setErrors(long num) {
+    	this.errors = num;
+    }
 
     @Override
-    public int getNumberOfRows() {
+    public long getNumberOfRows() {
         return getNumberErrors() + getNumberSuccesses();
     }
 
     @Override
-    public int getNumberErrors() {
+    public long getNumberErrors() {
         return this.errors;
     }
 
     @Override
-    public int getNumberSuccesses() {
+    public long getNumberSuccesses() {
         return this.successes;
     }
 
@@ -91,40 +128,58 @@ public abstract class AbstractVisitor implements IVisitor {
         return this.monitor;
     }
 
-    protected Config getConfig() {
-        return getController().getConfig();
+    protected AppConfig getConfig() {
+        return getController().getAppConfig();
     }
 
     protected Mapper getMapper() {
         return getController().getMapper();
     }
+    
+    protected DataWriterInterface getErrorWriter() {
+    	return this.errorWriter;
+    }
+    
+    protected DataWriterInterface getSuccessWriter() {
+    	return this.successWriter;
+    }
 
-    protected void writeSuccess(Row row, String id, String message) throws DataAccessObjectException {
+    protected void writeSuccess(TableRow row, String id, String message) throws DataAccessObjectException {
         if (writeStatus()) {
             if (id != null && id.length() > 0) {
-                row.put(Config.ID_COLUMN_NAME, id);
+                row.put(AppConfig.ID_COLUMN_NAME, id);
             }
             if (message != null && message.length() > 0) {
-                row.put(Config.STATUS_COLUMN_NAME, message);
+                row.put(AppConfig.STATUS_COLUMN_NAME, message);
             }
             this.successWriter.writeRow(row);
         }
         addSuccess();
     }
 
-    protected void writeError(Row row, String errorMessage) throws DataAccessObjectException {
+    protected void writeError(TableRow row, String errorMessage) throws DataAccessObjectException {
         if (writeStatus()) {
             if (row == null) {
-                row = Row.singleEntryImmutableRow(Config.ERROR_COLUMN_NAME, errorMessage);
+                row = TableRow.singleEntryImmutableRow(AppConfig.ERROR_COLUMN_NAME, errorMessage);
             } else {
-                row.put(Config.ERROR_COLUMN_NAME, errorMessage);
+                row.put(AppConfig.ERROR_COLUMN_NAME, errorMessage);
             }
             this.errorWriter.writeRow(row);
         }
-        this.errors++;
+        addErrors();
     }
 
     protected LoadRateCalculator getRateCalculator() {
         return this.rateCalculator;
+    }
+    
+    // Subclasses that support attachments (e.g. BulkLoadVisitor) need to override the method
+    @Override
+    public Map<String, InputStream> getAttachments() {
+        return null;
+    }
+
+    protected void resetCalculations() {
+        this.rateCalculator = new LoadRateCalculator();
     }
 }

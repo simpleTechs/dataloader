@@ -23,365 +23,172 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
+
+
 package com.salesforce.dataloader.security;
 
-import org.apache.log4j.Logger;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
-import java.io.*;
-import java.security.*;
-import java.security.spec.InvalidKeySpecException;
-
-import javax.crypto.*;
-import javax.crypto.spec.DESKeySpec;
+import com.salesforce.dataloader.util.AppUtil;
 
 public class EncryptionUtil {
-
-    private static final Logger LOGGER = Logger.getLogger(EncryptionUtil.class);
-    private Key gKey = null;
-    private String gCipherSeed = "namastearrigato";
-    private String gCipherKey = "51dda30be226233d";
-
-    public EncryptionUtil() {
-    }
-
-    /**
-     *
-     */
-    synchronized public void resetCryptoKey() {
-        gKey = null;
-        gCipherKey = null;
-    }
-
-    /**
-     * @param sKey
-     */
-    synchronized public void setCipherKey(String sKey) {
-        gCipherKey = sKey;
-    }
 
     /**
      * Convert text to bytes
      *
-     * @param text
      * @return bytes for the input text
      */
-    private static byte[] textToBytes(String text) {
-        byte[] baBytes = new byte[text.length() / 2];
-        for (int j = 0; j < text.length() / 2; j++) {
-            Integer tmpInteger = Integer.decode(new String("0x" + text.substring(j * 2, (j * 2) + 2)));
-            int tmpValue = tmpInteger.intValue();
-            if (tmpValue > 127) // fix negatives
-            {
-                tmpValue = (tmpValue - 127) * -1;
+    public static byte[] textToBytes(String text) {
+        int length = text.length() / 2;
+        byte[] byteArray = new byte[length];
+        for (int i = 0; i < length; i++) {
+            int value = Integer.decode("0x" + text.substring(i * 2, (i * 2) + 2));
+            if (value > 127) {
+                value = (value - 127) * -1;
             }
-            tmpInteger = new Integer(tmpValue);
-            baBytes[j] = tmpInteger.byteValue();
+            byteArray[i] = (byte) value;
         }
-
-        return baBytes;
+        return byteArray;
     }
 
     /**
      * Convert bytes to text
      *
-     * @param bytes
      * @return text for the input bytes
      */
-    private static String bytesToText(byte[] bytes) {
-        StringBuffer sb = new StringBuffer(bytes.length * 2);
-        for (int i = 0; i < bytes.length; i++) {
-            int num = bytes[i];
-            if (num < 0) num = 127 + (num * -1); // fix negative back to positive
+    public static String bytesToText(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            int num = b < 0 ? 127 + (b * -1) : b;
             String hex = Integer.toHexString(num);
             if (hex.length() == 1) {
-                hex = "0" + hex; // ensure 2 digits
+                sb.append('0');
             }
             sb.append(hex);
         }
-
         return sb.toString();
     }
 
-    /**
-     * Create a key for encryption and decryption
-     *
-     * @return Key
-     * @throws NoSuchAlgorithmException
-     * @throws InvalidKeySpecException
-     * @throws InvalidKeyException
-     */
-    synchronized private Key getCryptoKey() throws NoSuchAlgorithmException, InvalidKeySpecException,
-    InvalidKeyException {
-        if (gKey != null) return gKey;
-
-        String sKeyText = gCipherKey != null ? gCipherKey : generateKey(gCipherSeed);
-        byte[] baKeyBytes = textToBytes(sKeyText);
-
-        try {
-            SecretKeyFactory desFactory = SecretKeyFactory.getInstance("DES");
-            gKey = desFactory.generateSecret(new DESKeySpec(baKeyBytes));
-        } catch (InvalidKeyException e) {
-            throw e;
-        } catch (InvalidKeySpecException e) {
-            throw e;
-        }
-
-        return gKey;
-    }
-
-    /**
-     * Create the cipher object for encryption or decryption. We create a DES cipher with PKCS#5 padding
-     *
-     * @return Cipher
-     * @throws NoSuchAlgorithmException
-     * @throws NoSuchPaddingException
-     */
-    private static Cipher createCipher() throws NoSuchAlgorithmException, NoSuchPaddingException {
-        try {
-            return Cipher.getInstance("DES/ECB/PKCS5Padding");
-        } catch (NoSuchAlgorithmException e) {
-            throw e;
-        } catch (NoSuchPaddingException e) {
-            throw e;
-        }
-    }
-
-    /**
-     * Encrypt a string using whatever is the default encryption technique for the system.
-     *
-     * @param clearText
-     * @return The encrypted string
-     * @throws GeneralSecurityException
-     */
-    public String encryptString(String clearText) throws GeneralSecurityException {
-        if (clearText == null) return clearText;
-        Key oKey = getCryptoKey();
-        Cipher oCipher = createCipher();
-        byte[] encryptedBytes;
-
-        if (oCipher == null) { return clearText; }
-
-        byte[] inputBytes = clearText.getBytes();
-
-        try {
-            oCipher.init(Cipher.ENCRYPT_MODE, oKey);
-        } catch (InvalidKeyException e) {
-            throw e;
-        }
-
-        try {
-            encryptedBytes = oCipher.doFinal(inputBytes);
-        } catch (IllegalBlockSizeException e) {
-            throw e;
-        } catch (BadPaddingException e) {
-            throw e;
-        }
-
-        return bytesToText(encryptedBytes);
-    }
-
-    /**
-     * Decrypt a string using whatever is the default encryption technique for the system.
-     *
-     * @param cipherText
-     * @return The decrypted string
-     * @throws NoSuchPaddingException
-     * @throws NoSuchAlgorithmException
-     * @throws BadPaddingException
-     * @throws IllegalBlockSizeException
-     * @throws InvalidKeyException
-     */
-    public String decryptString(String cipherText) throws GeneralSecurityException {
-        if (cipherText == null) return cipherText;
-        Key key = getCryptoKey();
-        Cipher cipher = createCipher();
-
-        if (cipher == null) { return cipherText; }
-
-        try {
-            cipher.init(Cipher.DECRYPT_MODE, key);
-        } catch (InvalidKeyException e) {
-            throw e;
-        }
-
-        byte[] baCipherBytes = textToBytes(cipherText);
-
-        try {
-            return new String(cipher.doFinal(baCipherBytes));
-        } catch (BadPaddingException e) {
-            throw e;
-        } catch (IllegalBlockSizeException e) {
-            throw e;
-        }
-    }
-
-    /**
-     * Create a DES key and return a string version of the raw bits.
-     *
-     * @param seed
-     * @return A key for encryption
-     * @throws NoSuchAlgorithmException
-     */
-    public static String generateKey(String seed) throws NoSuchAlgorithmException {
-
-        byte[] seedBytes = seed.getBytes();
-        SecureRandom random = new SecureRandom(seedBytes);
-        KeyGenerator keygen = null;
-        try {
-            keygen = KeyGenerator.getInstance("DES");
-        } catch (NoSuchAlgorithmException e) {
-            throw e;
-        }
-
-        keygen.init(random);
-        Key key = keygen.generateKey();
-
-        byte[] keyBytes = key.getEncoded();
-
-        return bytesToText(keyBytes);
-    }
-
-    /**
-     * @param keyFilename
-     * @throws IOException
-     */
-    public void setCipherKeyFromFilePath(String keyFilename) throws IOException {
-        try {
-            File keyFile = new File(keyFilename);
-            if (keyFile.exists() && keyFile.canRead()) {
-                FileReader fr = new FileReader(keyFile);
-                BufferedReader br = new BufferedReader(fr);
-                String line = null;
-                while ((line = br.readLine()) != null) {
-                    break;
-                }
-                if (line != null) {
-                    resetCryptoKey(); // Reset Key
-                    setCipherKey(line);
-                }
-            } else {
-                throw new IOException("Cannot Access Key File: " + keyFilename);
-            }
-        } catch (IOException e) {
-            throw e;
-        }
-    }
-
     private static void printUsage() {
-        LOGGER.info("\nUtility to encrypt a string based on a static or a provided key");
-        LOGGER.info("Options (mutually exclusive - use one at a time): \n"
-                + "\t-g <seed text>                                 Generate key based on seed\n"
-                + "\t-v <encrypted> <decrypted value> [Path to Key] Validate whether decryption of encrypted value matches the decrypted value, optionally provide key file\n"
-                + "\t-e <plain text> [Path to Key]                  Encrypt a plain text value, optionally provide key file (generate key using option -g)");
+        String usage = "\nUtility to encrypt a string based on a static or a provided key\n"
+                + "Options (mutually exclusive - use one at a time): \n"
+                + "\t-e <plain text> [keyfile]                Encrypt a plain text value using optional keyfile\n"
+                + "\t-d <encryptText> [keyfile]               Decrypt an encrypted text back to plain text value using optional keyfile\n"
+                + "\t-k [keyfile]                             Generate keyfile with optional path to keyfile\n"
+                + "\n keyfile defaults to $HOME(%userprofile% on Windows)/.dataloader/dataLoader.key if not specified";
+        System.out.println(usage);
     }
 
     public static void main(String[] args) {
-        // args[0] = input data, required
-        // args[1] = key (optional)
-        if (args.length < 1) {
-            printUsage();
-            System.exit(-1);
-        }
+        System.exit(execute(args));
+    }
 
-        int i = 0;
-        String option = args[i];
-        if (option.length() < 2 || option.charAt(0) != '-') {
-            LOGGER.info("Invalid option format: " + args[i]);
-            System.exit(-1);
-        }
-        // make sure enough arguments are provided
-        if (arrayTooSmall(args, i)) {
-            LOGGER.info("Option '" + option + "' requires at least one parameter.  Please check usage.\n");
-            printUsage();
-            System.exit(-1);
-        }
-        // advance index to param and save the param value
-        String param = args[++i];
-        switch (option.charAt(1)) {
-            case 'g':
-                try {
-                    String key = generateKey(param);
-                    LOGGER.info(key);
-                } catch (NoSuchAlgorithmException e) {
-                    LOGGER.error("Error generating key: " + e.getMessage());
-                    System.exit(-1);
-                }
-                break;
-            case 'v':
-                // verify if encrypted value matches the encrypted the encrypted
-                // cleartext
-                // if optional key file is provided, use it
-                if (arrayTooSmall(args, i)) {
-                    LOGGER.info("Please provide decrypted value to validate against");
-                    printUsage();
-                    System.exit(-1);
-                }
-                String decryptExpected = args[++i];
-                EncryptionUtil dec = new EncryptionUtil();
-                if (!arrayTooSmall(args, i)) {
-                    try {
-                        dec.setCipherKeyFromFilePath(args[++i]);
-                    } catch (IOException e) {
-                        LOGGER.error("Error setting the key from file: "
-                                + args[i] + ", error: " + e.getMessage());
-                        System.exit(-1);
-                    }
-                }
-                try {
-                    String decrypted = dec.decryptString(param);
-                    LOGGER.info("Decryption of encrypted value "
-                            + (decryptExpected.equals(decrypted) ? "MATCHES"
-                            : "DOES NOT MATCH") + " the expected value");
-                } catch (GeneralSecurityException e) {
-                    LOGGER.error("Error decrypting string: " + param
-                            + ", error: " + e.getMessage());
-                    System.exit(-1);
-                }
-                break;
-            case 'e':
-                // if optional key file is provided, use it
-                EncryptionUtil enc = new EncryptionUtil();
-                if (!arrayTooSmall(args, i)) {
-                    String keyFilename = args[++i];
-                    File keyFile = new File(keyFilename);
-                    if (!keyFile.exists() && !keyFile.canRead()) {
-                        LOGGER.warn("Please ensure that the key file '"
-                                + keyFilename + "' exists and is readable");
-                        printUsage();
-                        System.exit(-1);
-                    }
-                    try {
-                        enc.setCipherKeyFromFilePath(keyFilename);
-                    } catch (IOException e) {
-                        LOGGER.error("Error setting the key from file: "
-                                + keyFilename + ", error: " + e.getMessage());
-                        System.exit(-1);
-                    }
-                }
-                try {
-                    // encrypt the given string and output to STDOUT
-                    String encrypted;
-                    encrypted = enc.encryptString(param);
-                    LOGGER.info(encrypted);
-                } catch (GeneralSecurityException e) {
-                    LOGGER.error("Error encrypting string: " + param
-                            + ", error: " + e.getMessage());
-                    System.exit(-1);
-                }
-                break;
-            default:
-                LOGGER.error("Unsupported option: " + option);
+    public static int execute(String[] args) {
+        try {
+            if (args.length < 1) {
                 printUsage();
-                System.exit(-1);
+                return AppUtil.EXIT_CODE_CLIENT_ERROR;
+            }
+
+            args = removeCommandLineOptions(args);
+
+            String operation = "";
+            for (String arg : args) {
+                if (arg.startsWith("-") && (arg.equals("-e") || arg.equals("-d") || arg.equals("-k"))) {
+                    operation = arg;
+                    break;
+                }
+            }
+
+            if (operation.isEmpty()) {
+                throw new IllegalArgumentException("Unsupported operation");
+            }
+
+            int operationArgIndex = Arrays.asList(args).indexOf(operation);
+            if (operationArgIndex == -1 || (operationArgIndex + 1 >= args.length && !operation.equals("-k"))) {
+                System.out.println("Option '" + operation + "' requires at least one parameter. Please check usage.\n");
+                throw new IllegalArgumentException();
+            }
+
+            String param = args.length > operationArgIndex + 1 ? args[operationArgIndex + 1] : null;
+            switch (operation) {
+                case "-e":
+                    handleEncryption(param, args, operationArgIndex);
+                    break;
+                case "-d":
+                    handleDecryption(param, args, operationArgIndex);
+                    break;
+                case "-k":
+                    handleKeyFileCreation(args, operationArgIndex);
+                    break;
+                default:
+                    throw new IllegalArgumentException("Unsupported operation");
+            }
+            return AppUtil.EXIT_CODE_NO_ERRORS;
+        } catch (IllegalArgumentException e) {
+            printUsage();
+            return AppUtil.EXIT_CODE_CLIENT_ERROR;
         }
     }
 
-    /**
-     * @param array
-     * @param index
-     * @return true if array is too small to increment the index
-     */
-    private static boolean arrayTooSmall(String[] array, int index) {
-        return (index + 1) > (array.length - 1);
+    private static void handleEncryption(String param, String[] args, int operationArgIndex) {
+        if (param == null) {
+            throw new IllegalArgumentException("Encryption requires a plain text value.");
+        }
+        try {
+            EncryptionAesUtil enc = new EncryptionAesUtil();
+            if (args.length > operationArgIndex + 2) {
+                enc.setCipherKeyFromFilePath(args[operationArgIndex + 2]);
+            }
+            String encrypted = enc.encryptMsg(param);
+            System.out.println("The output string of encryption is: \n" + encrypted);
+        } catch (Exception e) {
+            System.out.println("Error during encryption: " + e.getMessage());
+            throw new IllegalArgumentException();
+        }
+    }
+
+    private static void handleDecryption(String param, String[] args, int operationArgIndex) {
+        if (param == null) {
+            throw new IllegalArgumentException("Decryption requires an encrypted text value.");
+        }
+        try {
+            EncryptionAesUtil enc = new EncryptionAesUtil();
+            if (args.length > operationArgIndex + 2) {
+                enc.setCipherKeyFromFilePath(args[operationArgIndex + 2]);
+            }
+            String plainText = enc.decryptMsg(param);
+            System.out.println("The output string of decryption is: \n" + plainText);
+        } catch (Exception e) {
+            System.out.println("Error during decryption: " + e.getMessage());
+            throw new IllegalArgumentException();
+        }
+    }
+
+    private static void handleKeyFileCreation(String[] args, int operationArgIndex) {
+        try {
+            EncryptionAesUtil enc = new EncryptionAesUtil();
+            String filePath = enc.createKeyFileIfNotExisting(args.length > operationArgIndex + 1 ? args[operationArgIndex + 1] : null);
+            System.out.println("Keyfile \"" + filePath + "\" was created!");
+        } catch (Exception e) {
+            System.out.println("Error during key file creation: " + e.getMessage());
+            throw new IllegalArgumentException();
+        }
+    }
+
+    public static boolean arrayTooSmall(String[] array, int index) {
+        return index >= array.length - 1;
+    }
+
+    public static String[] removeCommandLineOptions(String[] args) {
+        List<String> remainingArgs = new ArrayList<>();
+        for (String arg : args) {
+            if (!arg.contains("=")) {
+                remainingArgs.add(arg);
+            }
+        }
+        return remainingArgs.toArray(new String[0]);
     }
 }

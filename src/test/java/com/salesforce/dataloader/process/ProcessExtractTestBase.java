@@ -28,6 +28,7 @@ package com.salesforce.dataloader.process;
 
 import static org.junit.Assert.*;
 
+import java.io.File;
 import java.util.*;
 
 import org.junit.Assert;
@@ -36,14 +37,13 @@ import org.junit.runners.Parameterized;
 import com.salesforce.dataloader.TestSetting;
 import com.salesforce.dataloader.TestVariant;
 import com.salesforce.dataloader.action.OperationInfo;
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.controller.Controller;
-import com.salesforce.dataloader.dao.DataReader;
+import com.salesforce.dataloader.dao.DataReaderInterface;
 import com.salesforce.dataloader.dao.csv.CSVFileReader;
 import com.salesforce.dataloader.exception.DataAccessObjectException;
 import com.salesforce.dataloader.exception.ProcessInitializationException;
-import com.salesforce.dataloader.model.Row;
-import com.sforce.soap.partner.SaveResult;
+import com.salesforce.dataloader.model.TableRow;
 import com.sforce.soap.partner.sobject.SObject;
 import com.sforce.ws.ConnectionException;
 
@@ -57,13 +57,6 @@ public abstract class ProcessExtractTestBase extends ProcessTestBase {
 
     public ProcessExtractTestBase(Map<String, String> config) {
         super(config);
-    }
-
-    @Parameterized.Parameters(name = "{0}")
-    public static Collection<Object[]> getParameters() {
-        return Arrays.asList(
-                TestVariant.defaultSettings(),
-                TestVariant.forSettings(TestSetting.BULK_API_ENABLED));
     }
 
     protected class ExtractContactGenerator extends ContactGenerator {
@@ -112,37 +105,72 @@ public abstract class ProcessExtractTestBase extends ProcessTestBase {
 
     protected abstract boolean isExtractAll();
 
-    protected Map<String, String> getTestConfig(String soql, String entity, boolean useMappingFile) {
+    protected Map<String, String> getExtractionTestConfig(String soql, String entity, boolean useMappingFile) {
 
         final Map<String, String> argMap = getTestConfig(isExtractAll() ? OperationInfo.extract_all
                 : OperationInfo.extract, true);
-        argMap.put(Config.ENTITY, entity);
-        argMap.put(Config.EXTRACT_SOQL, soql);
-        argMap.put(Config.ENABLE_EXTRACT_STATUS_OUTPUT, Config.TRUE);
-        argMap.put(Config.EXTRACT_REQUEST_SIZE, "2000");
+        argMap.put(AppConfig.PROP_ENTITY, entity);
+        argMap.put(AppConfig.PROP_EXTRACT_SOQL, soql);
+        argMap.put(AppConfig.PROP_ENABLE_EXTRACT_STATUS_OUTPUT, AppConfig.TRUE);
+        argMap.put(AppConfig.PROP_LIMIT_OUTPUT_TO_QUERY_FIELDS, AppConfig.TRUE);
+        argMap.put(AppConfig.PROP_EXPORT_BATCH_SIZE, "2000");
         if (!useMappingFile) {
-            argMap.remove(Config.MAPPING_FILE);
+            argMap.remove(AppConfig.PROP_MAPPING_FILE);
         }
         return argMap;
     }
+    
+    Map<String, String> getDoNotLimitOutputToQueryFieldsTestConfig(String soql, String entity, boolean useMappingFile) {
 
+        final Map<String, String> argMap = getExtractionTestConfig(soql, entity, useMappingFile);
+        argMap.put(AppConfig.PROP_LIMIT_OUTPUT_TO_QUERY_FIELDS, AppConfig.FALSE);
+        return argMap;
+    }
+    
     // Utility functions
-
     protected void verifyIdsInCSV(Controller control, String[] ids) throws DataAccessObjectException {
+        verifyIdsInCSV(control, ids, false);
+    }
+
+    protected void verifyIdsInCSV(Controller control, String[] ids, boolean checkPhoneFormat) throws DataAccessObjectException {
 
         // assert that it's a CSV...if not fail
         final Set<String> unexpectedIds = new HashSet<String>();
         final Set<String> expectedIds = new HashSet<String>(Arrays.asList(ids));
-        String fileName = control.getConfig().getString(Config.OUTPUT_SUCCESS);
-        final DataReader resultReader = new CSVFileReader(fileName, getController());
+        String fileName = control.getAppConfig().getString(AppConfig.PROP_OUTPUT_SUCCESS);
+        final DataReaderInterface resultReader = new CSVFileReader(new File(fileName), getController().getAppConfig(), true, false);
         try {
             resultReader.open();
 
             // go through item by item and assert that it's there
-            Row row;
-            while ((row = resultReader.readRow()) != null) {
-                final String resultId = (String)row.get(Config.ID_COLUMN_NAME);
+            TableRow row;
+            int currentRow = 0;
+            while ((row = resultReader.readTableRow()) != null) {
+                final String resultId = (String)row.get(AppConfig.ID_COLUMN_NAME);
                 assertValidId(resultId);
+                String resultPhone = (String)row.get("Phone");
+                if (checkPhoneFormat && resultPhone != null) {
+                    resultPhone = resultPhone.substring(0, 8);
+                    int remainder = currentRow++ % 4;
+                    switch (remainder) {
+                        case 0 :
+                            assertEquals("Incorrect phone number conversion", resultPhone, "+1415555");
+                            break;
+                        case 1 :
+                            assertEquals("Incorrect phone number conversion", resultPhone, "(415) 55");
+                            break;
+                        case 2 :
+                            assertEquals("Incorrect phone number conversion", resultPhone, "(415) 55");
+                            break;
+                        case 3 :
+                            resultPhone = resultPhone.substring(0,5);
+                            assertEquals("Incorrect phone number conversion", resultPhone, "14155");
+                            break;
+                        default :
+                            assertEquals("Incorrect phone number conversion", resultPhone, "1415555");
+                            break;
+                    }
+                }
                 if (!expectedIds.remove(resultId)) {
                     unexpectedIds.add(resultId);
                 }
@@ -174,9 +202,9 @@ public abstract class ProcessExtractTestBase extends ProcessTestBase {
         String soql = null;
         Map<String, String> argmap = null;
         soql = "Select Account.Name, (Select Contact.LastName FROM Account.Contacts) FROM Account";
-        argmap = getTestConfig(soql, "Account", false);
+        argmap = getExtractionTestConfig(soql, "Account", false);
         // this error message to change
-        runProcessNegative(argmap, "Invalid soql: Nested queries are not supported");
+        runProcessNegative(argmap, "Invalid soql: Nested queries are not supported in SOQL SELECT clause");
     }
 
     public abstract void testSoqlWithRelationships() throws Exception;
@@ -210,6 +238,52 @@ public abstract class ProcessExtractTestBase extends ProcessTestBase {
         runSoqlRelationshipTest(contactId, accountId,
                 "Select c.Id, C.Name, TestField__r.TestField__c, CONTACT.account.NAME, c.account.Id From Contact c Where Id = '" + contactId + "'");
     }
+    
+    protected void runTestSelectFieldsSoql() throws ProcessInitializationException,
+    DataAccessObjectException {
+
+        final TestFieldGenerator testFieldGen = new TestFieldGenerator();
+        final String[] testFieldIds = insertSfdcRecords(1, false, testFieldGen);
+
+        // TEST only if it is Partner or Bulk v2
+        // set batch process parameters
+        if (!isBulkAPIEnabled(this.getTestConfig()) || isBulkV2APIEnabled(this.getTestConfig())) {
+            String soql = "SELECT fields(standard) FROM TestField__c WHERE id='" + testFieldIds[0] + "'"; // fields are not explicitly specified in SOQL
+            Map<String, String> testConfig = getDoNotLimitOutputToQueryFieldsTestConfig(soql, "Account", true);
+            Controller control = runProcess(testConfig, 1);
+            // verify IDs and phone format 
+            verifyIdsInCSV(control, testFieldIds, false);
+            String fileName = control.getAppConfig().getString(AppConfig.PROP_OUTPUT_SUCCESS);
+            final DataReaderInterface resultReader = new CSVFileReader(new File(fileName), getController().getAppConfig(), true, false);
+            try {
+                resultReader.open();
+
+                // go through item by item and assert that it's there
+                TableRow row;
+                int rowIdx = 0;
+                while ((row = resultReader.readTableRow()) != null) {
+                    final String resultId = (String)row.get(AppConfig.ID_COLUMN_NAME);
+                    assertValidId(resultId);
+                    assertEquals(resultId, testFieldIds[rowIdx]);
+                    
+                    final String resultName = (String)row.get("name_to_test");
+                    assertTrue("Name field not mapped to DAO name in success file", 
+                            resultName != null && !resultName.isBlank() && resultName.startsWith("testfield__"));
+                    rowIdx++;
+                }
+            } finally {
+                resultReader.close();
+            }
+
+        }
+        // cleanup
+        try {
+            getBinding().delete(testFieldIds);
+        } catch (ConnectionException e) {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+        }
+     }
 
     public abstract void testSoqlWithTableNameInSelect() throws Exception;
 
@@ -217,16 +291,10 @@ public abstract class ProcessExtractTestBase extends ProcessTestBase {
     ConnectionException {
         final ExtractContactGenerator contactGenerator = new ExtractContactGenerator();
         final String soql = contactGenerator.getSOQL("Contact.Id, Contact.Account.id");
-        final Map<String, String> argmap = getTestConfig(soql, "Contact", false);
-        if (isBulkAPIEnabled(argmap)) {
-            runProcessNegative(
-                    argmap,
-                    "Batch failed: InvalidBatch : Failed to process query: FUNCTIONALITY_NOT_ENABLED: Foreign Key Relationships not supported in Bulk Query");
-        } else {
-            final String[] contactIds = insertExtractTestRecords(10, contactGenerator);
-            Controller control = runProcess(argmap, contactIds.length);
-            verifyIdsInCSV(control, contactIds);
-        }
+        final Map<String, String> argmap = getExtractionTestConfig(soql, "Contact", false);
+        final String[] contactIds = insertExtractTestRecords(10, contactGenerator);
+        Controller control = runProcess(argmap, contactIds.length);
+        verifyIdsInCSV(control, contactIds);
     }
 
     // Tests common to both that need to be implemented
@@ -236,10 +304,15 @@ public abstract class ProcessExtractTestBase extends ProcessTestBase {
         final String nonQueryableType = "AggregateResult";
 
         final String soql = "select id from " + nonQueryableType;
-        final Map<String, String> argmap = getTestConfig(soql, nonQueryableType, false);
-        argmap.put(Config.OPERATION, OperationInfo.extract_all.name());
+        final Map<String, String> argmap = getExtractionTestConfig(soql, nonQueryableType, false);
 
-        runProcessNegative(argmap, "entity type " + nonQueryableType + " does not support query");
+        if (isBulkV2APIEnabled(argmap) || !isBulkAPIEnabled(argmap)) {
+            // Partner or Bulk v2 query 
+            runProcessNegative(argmap, "entity type " + nonQueryableType + " does not support query");
+        } else {
+            // Bulk v1 query
+            runProcessNegative(argmap, "Entity '" + nonQueryableType + "' is not supported by the Bulk API.");
+        }
     }
 
     public abstract void testMalformedQueries() throws Exception;
@@ -260,33 +333,34 @@ public abstract class ProcessExtractTestBase extends ProcessTestBase {
 
     private void runExtractNegativeTest(String soql, String expectedErrorMsg) throws ProcessInitializationException,
     DataAccessObjectException {
-        runProcessNegative(getTestConfig(soql, "Account", false), expectedErrorMsg);
+        runProcessNegative(getExtractionTestConfig(soql, "Account", false), expectedErrorMsg);
     }
 
     protected void runSoqlRelationshipTest(String contactId, String accountId, final String soql)
             throws ProcessInitializationException, DataAccessObjectException {
+        setServerApiInvocationThreshold(100);
+        Map<String, String> argMap = getExtractionTestConfig(soql, "Contact", true);
+        doRunSoqlRelationshipTest(contactId, accountId, soql, argMap);
+        argMap = getDoNotLimitOutputToQueryFieldsTestConfig(soql, "Contact", true);
+        doRunSoqlRelationshipTest(contactId, accountId, soql, argMap);
+    }
+    
+    private void doRunSoqlRelationshipTest(String contactId, String accountId, final String soql, Map<String, String> argMap)
+            throws ProcessInitializationException, DataAccessObjectException {
 
-        final Map<String, String> argMap = getTestConfig(soql, "Contact", true);
+        runProcess(argMap, 1);
+        final CSVFileReader resultReader = new CSVFileReader(new File(argMap.get(AppConfig.PROP_DAO_NAME)), getController().getAppConfig(), true, false);
+        try {
+            final TableRow resultRow = resultReader.readTableRow();
+            assertEquals("Query returned incorrect Contact ID", contactId, resultRow.get("CONTACT_ID"));
+            assertEquals("Query returned incorrect Contact Name", "First 000000 Last 000000",
+                    resultRow.get("CONTACT_NAME"));
+            assertEquals("Query returned incorrect Account ID", accountId, resultRow.get("ACCOUNT_ID"));
+            assertEquals("Query returned incorrect Account Name", "account insert#000000",
+                    resultRow.get("ACCOUNT_NAME"));
 
-        if (isBulkAPIEnabled(argMap)) {
-            runProcessNegative(
-                    argMap,
-                    "Batch failed: InvalidBatch : Failed to process query: FUNCTIONALITY_NOT_ENABLED: Foreign Key Relationships not supported in Bulk Query");
-        } else {
-            runProcess(argMap, 1);
-            final CSVFileReader resultReader = new CSVFileReader(argMap.get(Config.DAO_NAME), getController());
-            try {
-                final Row resultRow = resultReader.readRow();
-                assertEquals("Query returned incorrect Contact ID", contactId, resultRow.get("CONTACT_ID"));
-                assertEquals("Query returned incorrect Contact Name", "First 000000 Last 000000",
-                        resultRow.get("CONTACT_NAME"));
-                assertEquals("Query returned incorrect Account ID", accountId, resultRow.get("ACCOUNT_ID"));
-                assertEquals("Query returned incorrect Account Name", "account insert#000000",
-                        resultRow.get("ACCOUNT_NAME"));
-
-            } finally {
-                resultReader.close();
-            }
+        } finally {
+            resultReader.close();
         }
     }
 
@@ -298,72 +372,63 @@ public abstract class ProcessExtractTestBase extends ProcessTestBase {
         final ExtractAccountGenerator accountGen = new ExtractAccountGenerator();
         final int numRecords = 100;
         final String[] accountIds = insertExtractTestRecords(numRecords, accountGen);
-        final String soql = accountGen
-                .getSOQL("ID, NAME, TYPE, PHONE, ACCOUNTNUMBER__C, WEBSITE, ANNUALREVENUE, LASTMODIFIEDDATE, ORACLE_ID__C");
-        Controller control = runProcess(getTestConfig(soql, "Account", true), numRecords);
-        verifyIdsInCSV(control, accountIds);
-    }
-
-    public void testPolymorphicRelationshipExtract() throws Exception {
-        // create a test lead
-        final String uid = getBinding().getUserInfo().getUserId();
-        final String[] leadidArr = createLead(uid);
+        
+        String soql;
+        if (isBulkAPIEnabled(this.getTestConfig()) || isBulkV2APIEnabled(this.getTestConfig())) {
+            soql= accountGen
+                    .getSOQL("ID, NAME, TYPE, PHONE, ACCOUNTNUMBER__C, WEBSITE, ANNUALREVENUE, LASTMODIFIEDDATE, ORACLE_ID__C");
+        } else {
+            soql= accountGen
+                    .getSOQL("ID, BILLINGADDRESS, NAME, TYPE, PHONE, ACCOUNTNUMBER__C, WEBSITE, ANNUALREVENUE, LASTMODIFIEDDATE, ORACLE_ID__C");
+            
+        }
+        Map<String, String> testConfig = getExtractionTestConfig(soql, "Account", true);
+        testConfig.put(AppConfig.PROP_DAO_WRITE_BATCH_SIZE, "10"); // total 100 entries in the results file, write in chunks of 10
+        Controller control = runProcess(testConfig, numRecords);
+        // verify IDs and phone format 
+        verifyIdsInCSV(control, accountIds, true);
+        
+        // Verify that column positions match positions
+        // specified in the mapping (.sdl) file.
+        String fileName = control.getAppConfig().getString(AppConfig.PROP_DAO_NAME);
+        final DataReaderInterface extractionReader = new CSVFileReader(new File(fileName), getController().getAppConfig(), true, false);
         try {
-            final String soql = "SELECT Id, Owner.Name, Lead.Owner.Id, x.owner.lastname, OwnerId FROM Lead x where id='"
-                    + leadidArr[0] + "'";
-            final Map<String, String> argmap = getTestConfig(soql, "Lead", true);
-            if (isBulkAPIEnabled(argmap)) {
-                // bulk api doesn't support foreign key relationships so it will always fail
-                final String expectedError = "Batch failed: InvalidBatch : Failed to process query: FUNCTIONALITY_NOT_ENABLED: Foreign Key Relationships not supported in Bulk Query";
-                runProcessNegative(
-                        argmap,
-                        expectedError);
-            } else {
-                // run the extract
-                runProcess(argmap, 1);
-                // open the results of the extraction
-                final CSVFileReader rdr = new CSVFileReader(argmap.get(Config.DAO_NAME), getController());
-                rdr.open();
-                Row row = rdr.readRow();
-                assertNotNull(row);
-                assertEquals(5,row.size());
-                // validate the extract results are correct.
-                assertEquals(leadidArr[0], row.get("LID"));
-                assertEquals("loader", row.get("LNAME"));
-                assertEquals("data loader", row.get("NAME__RESULT"));
-                assertEquals(uid, row.get("OID"));
-                assertEquals(uid,row.get("OWNID"));
-                // validate that we have read the only result. there should be only one.
-                assertNull(rdr.readRow());
+            extractionReader.open();
+            List<String> daoCols = extractionReader.getColumnNames();
+            String colAt = daoCols.get(4);
+            assertEquals("Incorrect DAO column sequence", colAt.toUpperCase(), "ACCOUNT_NAME");
+            colAt = daoCols.get(5);
+            assertEquals("Incorrect DAO column sequence", colAt.toUpperCase(), "ACCOUNT_ID");
 
+            // Verify that column positions not specified in the mapping
+            // file are in the same order as specified in SOQL.
+            colAt = daoCols.get(7);
+            if (isBulkAPIEnabled(this.getTestConfig()) || isBulkV2APIEnabled(this.getTestConfig())) {
+                assertEquals("Incorrect DAO column sequence", colAt.toUpperCase(), "WEBSITE");
+            } else {
+                assertEquals("Incorrect DAO column sequence", colAt.toUpperCase(), "TYPE");
             }
         } finally {
-            // cleanup here since the parent doesn't clean up leads
-            getBinding().delete(leadidArr);
+            extractionReader.close();
+        } 
+        
+        testConfig = getDoNotLimitOutputToQueryFieldsTestConfig(soql, "Account", true);
+        control = runProcess(testConfig, numRecords);
+        // verify IDs and phone format 
+        verifyIdsInCSV(control, accountIds, true);
+        
+        if (!isBulkAPIEnabled(this.getTestConfig())
+                && !isBulkV2APIEnabled(this.getTestConfig())) {
+            // Bulk v1 does not support Select fields()
+            // Bulk v2 supports Select fields but Account sobject's standard fields contain compound
+            // fields which are not supported by Bulk v2.
+            soql = accountGen
+                    .getSOQL("fields(standard)"); // fields are not explicitly specified in SOQL
+            testConfig = getDoNotLimitOutputToQueryFieldsTestConfig(soql, "Account", true);
+            control = runProcess(testConfig, numRecords);
+            // verify IDs and phone format 
+            verifyIdsInCSV(control, accountIds, true);
         }
-
-    }
-
-    /** creates a lead owned by the provided user */
-    private String[] createLead(final String uid) throws ConnectionException {
-        final SObject lead = new SObject();
-        // Create a lead sobject
-        lead.setType("Lead");
-        lead.setField("LastName", "test lead");
-        lead.setField("Company", "salesforce");
-        lead.setField("OwnerId", uid);
-
-        // insert the lead
-        final SaveResult[] result = getBinding().create(new SObject[] { lead });
-
-        // validate save result
-        assertNotNull(result);
-        assertEquals(1, result.length);
-        assertTrue(Arrays.toString(result[0].getErrors()), result[0].isSuccess());
-
-        // get new lead id
-        final String[] leadidArr = new String[] { result[0].getId() };
-        return leadidArr;
     }
 
     public abstract void testExtractAccountCsvAggregate() throws Exception;
@@ -376,16 +441,17 @@ public abstract class ProcessExtractTestBase extends ProcessTestBase {
         insertExtractTestRecords(numRecords, accountGen);
 
         final String soql = accountGen.getSOQL("max(numberofemployees) max_emps");
-        final Map<String, String> argMap = getTestConfig(soql, "Account", false);
-        if (isBulkAPIEnabled(argMap)) {
+        final Map<String, String> argMap = getExtractionTestConfig(soql, "Account", false);
+        if (isBulkAPIEnabled(argMap) || isBulkV2APIEnabled(this.getTestConfig())) {
             runProcessNegative(
                     argMap,
-                    "Batch failed: InvalidBatch : Failed to process query: FUNCTIONALITY_NOT_ENABLED: Aggregate Relationships not supported in Bulk Query");
+                    "Aggregate Relationships not supported in Bulk Query");
         } else {
             runProcess(argMap, 1, true);
-            final CSVFileReader resultReader = new CSVFileReader(argMap.get(Config.DAO_NAME), getController());
+            final CSVFileReader resultReader = new CSVFileReader(new File(argMap.get(AppConfig.PROP_DAO_NAME)), getController().getAppConfig(), true, false);
             try {
-                assertEquals(String.valueOf(numRecords - 1), resultReader.readRow().get("MAX(NUMBEROFEMPLOYEES)"));
+                String maxNumEmployees = (String)resultReader.readTableRow().get("MAX(NUMBEROFEMPLOYEES)");
+                assertEquals(String.valueOf(numRecords - 1), maxNumEmployees);
             } finally {
                 resultReader.close();
             }
@@ -400,11 +466,4 @@ public abstract class ProcessExtractTestBase extends ProcessTestBase {
         }
         return ids;
     }
-
-    @Override
-    protected boolean isBulkAPIEnabled(Map<String, String> argMap) {
-        // bulk api is not used for query all
-        return !isExtractAll() && super.isBulkAPIEnabled(argMap);
-    }
-
 }

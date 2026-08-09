@@ -30,13 +30,16 @@ import java.io.IOException;
 import java.util.*;
 
 import com.salesforce.dataloader.model.Row;
-import org.apache.log4j.Logger;
+import com.salesforce.dataloader.model.TableRow;
+
+import org.apache.logging.log4j.Logger;
+import com.salesforce.dataloader.util.DLLogManager;
 
 import com.salesforce.dataloader.action.progress.ILoaderProgress;
 import com.salesforce.dataloader.action.visitor.DAOSizeVisitor;
 import com.salesforce.dataloader.config.*;
-import com.salesforce.dataloader.dao.DataAccessObject;
-import com.salesforce.dataloader.dao.DataReader;
+import com.salesforce.dataloader.dao.DataAccessObjectInterface;
+import com.salesforce.dataloader.dao.DataReaderInterface;
 import com.salesforce.dataloader.exception.*;
 
 /**
@@ -54,17 +57,17 @@ public class DAORowUtil {
         return INSTANCE;
     }
 
-    static Logger logger = Logger.getLogger(DAORowUtil.class);
+    static Logger logger = DLLogManager.getLogger(DAORowUtil.class);
 
     /**
      * Utility function for calculating the total number of rows available to current DAO instance
      * @throws DataAccessObjectException
      */
-    public static int calculateTotalRows(DataReader dataReader) throws DataAccessObjectException {
+    public static int calculateTotalRows(DataReaderInterface dataReader) throws DataAccessObjectException {
         try {
             //visit the rows
             DAOSizeVisitor visitor = new DAOSizeVisitor();
-            for (Row row = dataReader.readRow(); isValidRow(row); row = dataReader.readRow()) {
+            for (TableRow row = dataReader.readTableRow(); isValidTableRow(row); row = dataReader.readTableRow()) {
                 visitor.visit(row);
             }
 
@@ -93,6 +96,14 @@ public class DAORowUtil {
      * @param row
      * @return true if row is valid
      */
+    public static boolean isValidTableRow(TableRow row) {
+        if (row == null) { return false; }
+        return true;
+    }
+    /**
+     * @param row
+     * @return true if row is valid
+     */
     public static boolean isValidRow(List<?> row) {
         if (row == null) { return false; }
         if (row.size() == 1 && ("".equals(row.get(0)))) { return false; }
@@ -104,36 +115,36 @@ public class DAORowUtil {
      * @param dao Data access object to validate columns for
      * @return A validation warning or null
      */
-    public static String validateColumns(DataAccessObject dao) {
+    public static String validateColumns(DataAccessObjectInterface dao) {
         HashSet<String> uniqueHeaders = new HashSet<String>();
-        String warning = null;
+        String error = null;
         for (String header : dao.getColumnNames()) {
             if (header == null || header.length() == 0) {
-                warning = Messages.getString("RowUtil.warningEmptyColumn"); //$NON-NLS-1$
+            	error = Messages.getString("RowUtil.warningEmptyColumn"); //$NON-NLS-1$
                 break;
             } else if (uniqueHeaders.contains(header)) {
-                warning = Messages.getFormattedString("RowUtil.warningDuplicateColumn", header); //$NON-NLS-1$
+            	error = Messages.getFormattedString("RowUtil.warningDuplicateColumn", header); //$NON-NLS-1$
                 break;
             }
             uniqueHeaders.add(header);
         }
-        if (warning != null) {
-            logger.warn(warning);
+        if (error != null) {
+            logger.error(error);
         }
-        return warning;
+        return error;
     }
 
-    public void skipRowToStartOffset(Config cfg, DataReader rdr, ILoaderProgress mon, boolean updateProgress)
+    public void skipRowToStartOffset(AppConfig cfg, DataReaderInterface rdr, ILoaderProgress mon, boolean updateProgress)
             throws LoadException {
 
         try {
-            cfg.setValue(LastRun.LAST_LOAD_BATCH_ROW, 0);
+            cfg.setValue(LastRunProperties.LAST_LOAD_BATCH_ROW, 0);
             rowToStart(cfg, rdr);
             if (updateProgress) {
                 // set the last processed value to the starting row
                 int currentRow = rdr.getCurrentRowNumber();
                 if (mon != null && currentRow > 0) mon.worked(currentRow);
-                cfg.setValue(LastRun.LAST_LOAD_BATCH_ROW, currentRow);
+                cfg.setValue(LastRunProperties.LAST_LOAD_BATCH_ROW, currentRow);
                 cfg.saveLastRun();
             }
         } catch (final DataAccessObjectException e) {
@@ -141,6 +152,46 @@ public class DAORowUtil {
         } catch (final IOException e) {
             handleError(e, "errorLastRun");
         }
+    }
+    
+    public static String getPhoneFieldValue(String phoneValue, String localeStr) {
+
+        
+        // The field is a phone field.
+        // Per documentation at https://help.salesforce.com/s/articleView?id=000385963&type=1
+        // if Locale is set to English (United States) or English (Canada), 
+        // 10-digit phone numbers and 11-digit numbers that start with “1” are 
+        // formatted as (800) 555-1212.
+        //
+        // Locale codes "en_US" and "en_CA" obtained from 
+        // https://docs.oracle.com/cd/E23824_01/html/E26033/glset.html 
+        
+        if (localeStr == null) {
+            localeStr = Locale.getDefault().toString(); 
+        }
+        if (phoneValue == null 
+                || !("en_US".equalsIgnoreCase(localeStr) || "en_CA".equalsIgnoreCase(localeStr))
+                || phoneValue.length() < 10
+                || phoneValue.length() > 11
+        ) {
+            return phoneValue;
+        }
+        
+        try {
+            Long.parseUnsignedLong(phoneValue);
+        } catch (Exception ex) {
+            // phone number contains non-numeric characters
+            return phoneValue;
+        }
+        if (phoneValue.startsWith("+") || phoneValue.startsWith("-")) {
+            return phoneValue;
+        }
+        if (phoneValue.length() == 10) { // use the format (xxx) xxx-xxxx
+            phoneValue = phoneValue.replaceFirst("(\\d{3})(\\d{3})(\\d+)", "($1) $2-$3");
+        } else if (phoneValue.length() == 11 && phoneValue.startsWith("1")) { // length 11 and starts with 1
+            phoneValue = phoneValue.replaceFirst("(\\d{1})(\\d{3})(\\d{3})(\\d+)", "($2) $3-$4");
+        }
+        return phoneValue;
     }
 
     private void handleError(final Exception e, String msgKey) throws LoadException {
@@ -152,11 +203,11 @@ public class DAORowUtil {
     /**
      * Set the dataReader to point to the row where load has to be started
      */
-    private void rowToStart(Config cfg, DataReader daoReader) throws DataAccessObjectException {
+    private void rowToStart(AppConfig cfg, DataReaderInterface daoReader) throws DataAccessObjectException {
         // start at the correct row
         final int rowToStart;
         try {
-            rowToStart = cfg.getInt(Config.LOAD_ROW_TO_START_AT);
+            rowToStart = cfg.getInt(AppConfig.PROP_LOAD_ROW_TO_START_AT);
         } catch (final ParameterLoadException e) {
             return;
         }
@@ -164,7 +215,7 @@ public class DAORowUtil {
             // keep skipping over rows until we run into an invalid row or we have gotten
             // to the starting row
             while (daoReader.getCurrentRowNumber() < rowToStart) {
-                if (!DAORowUtil.isValidRow(daoReader.readRow())) break;
+                if (!DAORowUtil.isValidTableRow(daoReader.readTableRow())) break;
             }
         }
     }

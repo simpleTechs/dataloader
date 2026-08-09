@@ -28,17 +28,24 @@ package com.salesforce.dataloader.dyna;
 import java.lang.reflect.InvocationTargetException;
 import java.util.*;
 
-import com.salesforce.dataloader.model.Row;
+import com.salesforce.dataloader.model.RowInterface;
+import com.salesforce.dataloader.model.TableHeader;
+import com.salesforce.dataloader.model.TableRow;
+import com.salesforce.dataloader.util.DateOnlyCalendar;
+
 import org.apache.commons.beanutils.*;
-import org.apache.log4j.Logger;
+import org.apache.logging.log4j.Logger;
+import com.salesforce.dataloader.util.DLLogManager;
 
 import com.salesforce.dataloader.action.visitor.DAOLoadVisitor;
 import com.salesforce.dataloader.client.DescribeRefObject;
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.client.SObject4JSON;
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.config.Messages;
 import com.salesforce.dataloader.controller.Controller;
 import com.salesforce.dataloader.exception.LoadException;
 import com.salesforce.dataloader.exception.ParameterLoadException;
+import com.salesforce.dataloader.exception.RelationshipFormatException;
 import com.sforce.soap.partner.*;
 import com.sforce.soap.partner.sobject.SObject;
 
@@ -51,7 +58,7 @@ import com.sforce.soap.partner.sobject.SObject;
 public class SforceDynaBean {
 
     //logger
-    public static Logger logger = Logger.getLogger(DAOLoadVisitor.class);
+    public static Logger logger = DLLogManager.getLogger(DAOLoadVisitor.class);
 
     /**
      *
@@ -75,22 +82,41 @@ public class SforceDynaBean {
         for (Field field : fields) {
             String fieldName = field.getName();
             //see which class type equals the field type
-            Class classType = getConverterClass(field);
+            Class<?> classType = getConverterClass(field);
             dynaProps.add(new DynaProperty(fieldName, classType));
 
             // if field is a reference to another object, remember the reference
             // NOTE: currently only fields with one reference are supported on the server
             FieldType fieldType = field.getType();
             String relationshipName = field.getRelationshipName();
-            if (fieldType == FieldType.reference && field.getReferenceTo().length == 1 &&
+            if (fieldType == FieldType.reference &&
                     relationshipName != null && relationshipName.length() > 0) {
-
-                DescribeRefObject refInfo = controller.getReferenceDescribes().get(relationshipName);
-                if(refInfo != null) {
-                    for(String refFieldName : refInfo.getFieldInfoMap().keySet()) {
-                        // property name contains information for mapping
-                        dynaProps.add(new DynaProperty(ObjectField.formatAsString(relationshipName, refFieldName),
-                                SObjectReference.class));
+                for (String parentName : field.getReferenceTo()) {
+                    ParentSObjectFormatter parentHandleForRelationship;
+                    try {
+                        parentHandleForRelationship = new ParentSObjectFormatter(parentName, relationshipName);
+                    } catch (RelationshipFormatException e) {
+                        logger.error(e.getMessage());
+                        continue;
+                    }
+                    DescribeRefObject parent = controller.getReferenceDescribes().getParentSObject(parentHandleForRelationship.toString());
+                    if(parent != null) {
+                        for(String refFieldName : parent.getParentObjectFieldMap().keySet()) {
+                            // property name contains information for mapping
+                            // add old format to dyna props
+                            try {
+                                dynaProps.add(new DynaProperty(
+                                                new ParentIdLookupFieldFormatter(null, relationshipName, refFieldName).toString(),
+                                                SObjectReference.class));
+                                dynaProps.add(new DynaProperty(
+                                        new ParentIdLookupFieldFormatter(parent.getParentObjectName(), relationshipName, refFieldName).toString(),
+                                        SObjectReference.class));
+                             } catch (RelationshipFormatException e) {
+                                // TODO Auto-generated catch block
+                               logger.error(e.getMessage());
+                            }
+                            // add new format to dyna props
+                       }
                     }
                 }
             }
@@ -130,7 +156,7 @@ public class SforceDynaBean {
             classType = Boolean.class;
             break;
         case date:
-            classType = Calendar.class;
+            classType = Date.class;
             break;
         case base64Binary:
             classType = byte[].class;
@@ -173,7 +199,7 @@ public class SforceDynaBean {
             classType = Boolean.class;
             break;
         case date:
-            classType = Calendar.class;
+            classType = DateOnlyCalendar.class;
             break;
         case base64Binary:
             classType = byte[].class;
@@ -200,15 +226,25 @@ public class SforceDynaBean {
      * @throws ConversionException
      * @throws LoadException
      */
-    static public DynaBean convertToDynaBean(BasicDynaClass dynaClass, Row sforceDataRow)
+    static public DynaBean convertToDynaBean(BasicDynaClass dynaClass, RowInterface sforceDataRow)
             throws ConversionException, LoadException {
         //now convert the data types, through our strongly typed bean
         DynaBean sforceObj = null;
         try {
             sforceObj = dynaClass.newInstance();
-
             //This does an automatic conversion of types.
             BeanUtils.copyProperties(sforceObj, sforceDataRow);
+            for (String sforceField : sforceDataRow.getColumnNames()) {
+                Object val = sforceDataRow.get(sforceField);
+                if (val != null
+                        && val instanceof String
+                        && !((String)val).isBlank()
+                        && sforceObj.get(sforceField) == null) {
+                    String errStr = "unable to convert a non-null " + sforceField + "value " + (String)val + " to a field on entity " + AppConfig.getCurrentConfig().getString(AppConfig.PROP_ENTITY);
+                    logger.error(errStr); //$NON-NLS-1$
+                    throw new LoadException(errStr);
+                }
+            }
             return sforceObj;
         } catch (IllegalAccessException e1) {
 
@@ -229,23 +265,40 @@ public class SforceDynaBean {
      * @param sObj
      * @param dynaBean
      */
-    static public void insertNullArray(Controller controller, SObject sObj, DynaBean dynaBean) {
-        final List<String> fieldsToNull = new LinkedList<String>();
+    static public void insertNullArrayForSOAP(Controller controller, SObject sObj, DynaBean dynaBean) {
+        final List<String> fieldsToNull = getFieldsToNull(controller, dynaBean);
+        if (fieldsToNull.size() > 0) sObj.setFieldsToNull(fieldsToNull.toArray(new String[fieldsToNull.size()]));
+    }
+    
+    static public void insertNullArrayForREST(Controller controller, Map<String, Object> sObj, DynaBean dynaBean) {
+        final List<String> fieldsToNull = getFieldsToNull(controller, dynaBean);
+        for (String field : fieldsToNull) {
+            sObj.put(field, null);
+        }
+    }
+    
+    static public List<String> getFieldsToNull(Controller controller, DynaBean dynaBean) {
+        final List<String> fieldsToNull = new ArrayList<String>();
         for (String sfdcField : controller.getMapper().getDestColumns()) {
             handleNull(sfdcField, dynaBean, fieldsToNull, controller);
         }
         for (Map.Entry<String, String> constantEntry : controller.getMapper().getConstantsMap().entrySet()) {
             handleNull(constantEntry.getKey(), dynaBean, fieldsToNull, controller);
         }
-        if (fieldsToNull.size() > 0) sObj.setFieldsToNull(fieldsToNull.toArray(new String[fieldsToNull.size()]));
+        return fieldsToNull;
     }
-
-    private static void handleNull(final String fieldName, final DynaBean dynaBean, final List<String> fieldsToNull,
+    
+    private static void handleNull(final String fieldNameList, final DynaBean dynaBean, final List<String> fieldsToNull,
             final Controller controller) {
-        final Object o = dynaBean.get(fieldName);
-        if (o != null && o instanceof SObjectReference && ((SObjectReference)o).isNull())
-            fieldsToNull.add(SObjectReference.getRelationshipField(controller, fieldName));
-        else if (o == null || String.valueOf(o).length() == 0) fieldsToNull.add(fieldName);
+        // fieldNameList can be a list of comma separated fields
+        String[]fieldNameArray = fieldNameList.split(",");
+
+        for (String fieldName : fieldNameArray) {
+            final Object o = dynaBean.get(fieldName.strip());
+            if (o != null && o instanceof SObjectReference && ((SObjectReference)o).isNull())
+                fieldsToNull.add(SObjectReference.getRelationshipField(controller, fieldName));
+            else if (o == null || String.valueOf(o).length() == 0) fieldsToNull.add(fieldName);
+        }
     }
 
     /**
@@ -262,16 +315,34 @@ public class SforceDynaBean {
         for (int j = 0; j < sObjects.length; j++) {
             DynaBean dynaBean = dynaBeans.get(j);
 
-            SObject sObj = getSObject(controller, entityName, dynaBean);
+            SObject sObj = getSOAPSObject(controller, entityName, dynaBean);
 
             // if we are inserting nulls, build the null array
             if (insertNulls) {
-                insertNullArray(controller, sObj, dynaBean);
+                insertNullArrayForSOAP(controller, sObj, dynaBean);
             }
 
             sObjects[j] = sObj;
         }
         return sObjects;
+    }
+    
+    static public List<Map<String, Object>> getRESTSObjectArray(Controller controller, List<DynaBean> dynaBeans, String entityName, boolean insertNulls) throws IllegalAccessException, InvocationTargetException, NoSuchMethodException, ParameterLoadException {
+        List<Map<String, Object>> restSObjects = new ArrayList <Map<String, Object>>();
+
+        for (int j = 0; j < dynaBeans.size(); j++) {
+            DynaBean dynaBean = dynaBeans.get(j);
+
+            Map<String, Object> sObj = getCompositeRESTSObject(controller, entityName, dynaBean);
+
+            // if we are inserting nulls, build the null array
+            if (insertNulls) {
+                insertNullArrayForREST(controller, sObj, dynaBean);
+            }
+
+            restSObjects.add(sObj);
+        }
+        return restSObjects;
     }
 
     /**
@@ -283,37 +354,74 @@ public class SforceDynaBean {
      * @throws NoSuchMethodException
      * @throws ParameterLoadException
      */
-    @SuppressWarnings("unchecked")
-    public static SObject getSObject(Controller controller, String entityName, DynaBean dynaBean) throws IllegalAccessException, InvocationTargetException, NoSuchMethodException, ParameterLoadException {
+    public static SObject getSOAPSObject(Controller controller, String entityName, DynaBean dynaBean) throws IllegalAccessException, InvocationTargetException, NoSuchMethodException, ParameterLoadException {
         SObject sObj = new SObject();
         sObj.setType(entityName);
-        Map<String, Object> fieldMap = BeanUtils.describe(dynaBean);
+        Map<String, String> fieldMap = BeanUtils.describe(dynaBean);
         for (String fName : fieldMap.keySet()) {
             if (fieldMap.get(fName) != null) {
                 // see if any entity foreign key references are embedded here
                 Object value = dynaBean.get(fName);
-                if (value != null && value instanceof SObjectReference) {
+                if (value instanceof SObjectReference) {
                     SObjectReference sObjRef = (SObjectReference)value;
-                    if (!sObjRef.isNull()) sObjRef.addReferenceToSObject(controller, sObj, fName);
+                    if (!sObjRef.isNull()) sObjRef.addReferenceToSObject(controller, sObj, null, fName);
                 } else {
-                    sObj.setField(fName, dynaBean.get(fName));
+                    sObj.setField(fName, value);
                 }
             }
         }
         return sObj;
+    }
+    
+    public static Map<String, Object> getCompositeRESTSObject(Controller controller, String entityName, DynaBean dynaBean) throws IllegalAccessException, InvocationTargetException, NoSuchMethodException, ParameterLoadException {
+        SObject4JSON restSObj = new SObject4JSON(entityName);
+        Map<String, String> fieldMap = BeanUtils.describe(dynaBean);
+        for (String fName : fieldMap.keySet()) {
+            if (fieldMap.get(fName) != null) {
+                // see if any entity foreign key references are embedded here
+                Object value = dynaBean.get(fName);
+                if (value instanceof SObjectReference) {
+                    try {
+                        ParentIdLookupFieldFormatter idLookupFieldFormatter = new ParentIdLookupFieldFormatter(fName);
+                        DescribeSObjectResult parentSObjectDescribe = controller.getSObjectMetaDataClient().describeSObject(idLookupFieldFormatter.getParent().getParentObjectName());
+                        DynaProperty[] parentDynaProps = createDynaProps(parentSObjectDescribe, controller);
+                        BasicDynaClass parentDynaClass = getDynaBeanInstance(parentDynaProps);
+                        ArrayList<String> parentLookupFieldList = new ArrayList<String>();
+                        parentLookupFieldList.add(idLookupFieldFormatter.getParentFieldName());
+                        TableHeader header = new TableHeader(parentLookupFieldList);
+                        TableRow parentDataRow = new TableRow(header);
+                        parentDataRow.put(idLookupFieldFormatter.getParentFieldName(), value);
+                        DynaBean parentDynaBean = convertToDynaBean(parentDynaClass, parentDataRow);
+                        Map<String, Object> parentRESTSObject = getCompositeRESTSObject(controller, idLookupFieldFormatter.getParent().getParentObjectName(), parentDynaBean);
+                        SObjectReference sObjRef = (SObjectReference)value;
+                        if (!sObjRef.isNull()) {
+                            restSObj.setField(idLookupFieldFormatter.getParent().getRelationshipName(),
+                                    parentRESTSObject);
+                        }
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                        logger.error("Unable to convert " + fName + " to parent reference");
+                    }
+                } else {
+                    restSObj.setField(fName, value);
+                }
+            }
+        }
+        return restSObj.getRepresentationForCompositeREST();
     }
 
     /**
      * Register dynabean data type converters for common java data types
      * @param useEuroDates if true, european date format will be used
      */
-    synchronized static public void registerConverters(Config cfg) {
-        final boolean useEuroDates = cfg.getBoolean(Config.EURO_DATES);
+    synchronized static public void registerConverters(AppConfig cfg) {
+        final boolean useEuroDates = cfg.getBoolean(AppConfig.PROP_EURO_DATES);
         final TimeZone tz = cfg.getTimeZone();
         // Register DynaBean type conversions
-        ConvertUtils.register(new DateConverter(tz, useEuroDates), Calendar.class);
+        ConvertUtils.register(new DateTimeConverter(tz, useEuroDates), Calendar.class);
+        ConvertUtils.register(new DateOnlyConverter(tz, useEuroDates), DateOnlyCalendar.class);
         ConvertUtils.register(new DoubleConverter(), Double.class);
-        ConvertUtils.register(new IntegerConverter(null), Integer.class);
+        ConvertUtils.register(new IntegerConverter(), Integer.class);
         ConvertUtils.register(new BooleanConverter(), Boolean.class);
         ConvertUtils.register(new StringConverter(), String.class);
         ConvertUtils.register(new FileByteArrayConverter(), byte[].class);

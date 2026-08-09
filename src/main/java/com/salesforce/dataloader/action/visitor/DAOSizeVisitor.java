@@ -26,9 +26,8 @@
 
 package com.salesforce.dataloader.action.visitor;
 
-import com.salesforce.dataloader.model.Row;
+import com.salesforce.dataloader.model.TableRow;
 
-import java.util.Map;
 
 /**
  * Visitor to calculate the size of a DataAccessObject
@@ -41,8 +40,9 @@ public class DAOSizeVisitor implements DAORowVisitor {
     private int numberOfRows = 0;
 
     @Override
-    public void visit(Row row) {
+    public boolean visit(TableRow row) {
         numberOfRows++;
+        return true;
     }
 
     public int getNumberOfRows() {

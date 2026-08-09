@@ -26,8 +26,10 @@
 
 package com.salesforce.dataloader.ui;
 
-import com.salesforce.dataloader.config.Config;
-import org.apache.log4j.Logger;
+import com.salesforce.dataloader.config.AppConfig;
+import org.apache.logging.log4j.Logger;
+import com.salesforce.dataloader.util.DLLogManager;
+
 import org.eclipse.swt.browser.Browser;
 import org.eclipse.swt.browser.ProgressEvent;
 import org.eclipse.swt.browser.ProgressListener;
@@ -37,24 +39,29 @@ import org.eclipse.swt.widgets.Shell;
  * The common class for listening to browser events use in oauth flows.
  */
 public abstract class OAuthBrowserListener implements ProgressListener {
+    private static Logger logger = DLLogManager.getLogger(AppConfig.class);
     protected final Browser browser;
     protected final Shell shell;
-    protected final Config config;
+    protected final AppConfig appConfig;
     private String reasonPhrase;
     private int statusCode;
     private boolean result;
 
-    public OAuthBrowserListener(Browser browser, Shell shell, Config config) {
+    public OAuthBrowserListener(Browser browser, Shell shell, AppConfig appConfig) {
         this.browser = browser;
         this.shell = shell;
-        this.config = config;
+        this.appConfig = appConfig;
     }
 
     @Override
     public abstract void changed(ProgressEvent progressEvent);
 
-    @Override
-    public abstract void completed(ProgressEvent progressEvent);
+    public void completed(ProgressEvent progressEvent) {
+        logger.debug("SWT Browser engine is " + 
+            browser.evaluate("var ua = navigator.userAgent, tem, M = ua.match(/(opera|chrome|safari|firefox|msie|trident(?=\\/))\\/?\\s*(\\d+)/i) || []; if (/trident/i.test(M[1])) { tem = /\\brv[ :]+(\\d+)/g.exec(ua) || []; return 'IE ' + (tem[1] || ''); } if (M[1] === 'Chrome') { tem = ua.match(/\\b(OPR|Edge)\\/(\\d+)/); if (tem != null) return tem.slice(1).join(' ').replace('OPR', 'Opera'); } M = M[2] ? [M[1], M[2]] : [navigator.appName, navigator.appVersion, '-?']; if ((tem = ua.match(/version\\/(\\d+)/i)) != null) M.splice(1, 1, tem[1]); return M.join(' ');"));
+        logger.debug("SWT Browser engine's userAgent property is " + 
+                browser.evaluate("return navigator.userAgent;"));
+    }
 
     public String getReasonPhrase() {
         return reasonPhrase;

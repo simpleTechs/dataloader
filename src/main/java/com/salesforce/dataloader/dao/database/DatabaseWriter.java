@@ -29,13 +29,14 @@ import java.io.File;
 import java.sql.*;
 import java.util.*;
 
-import com.salesforce.dataloader.model.Row;
-import org.apache.commons.dbcp.BasicDataSource;
-import org.apache.log4j.Logger;
+import com.salesforce.dataloader.model.RowInterface;
+import org.apache.commons.dbcp2.BasicDataSource;
+import org.apache.logging.log4j.Logger;
+import com.salesforce.dataloader.util.DLLogManager;
 
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.config.Messages;
-import com.salesforce.dataloader.dao.DataWriter;
+import com.salesforce.dataloader.dao.DataWriterInterface;
 import com.salesforce.dataloader.exception.*;
 
 /**
@@ -44,31 +45,31 @@ import com.salesforce.dataloader.exception.*;
  * @author Alex Warshavsky
  * @since 8.0
  */
-public class DatabaseWriter implements DataWriter {
+public class DatabaseWriter implements DataWriterInterface {
 
     // logger
-    private static Logger logger = Logger.getLogger(DatabaseReader.class);
+    private static Logger logger = DLLogManager.getLogger(DatabaseReader.class);
 
     private final BasicDataSource dataSource;
-    private final Config config;
+    private final AppConfig appConfig;
     private int currentRowNumber = 0;
     private final SqlConfig sqlConfig;
     private final DatabaseContext dbContext;
 
-    public DatabaseWriter(Config config) throws DataAccessObjectInitializationException {
-        this(config, config.getString(Config.DAO_NAME));
+    public DatabaseWriter(AppConfig appConfig) throws DataAccessObjectInitializationException {
+        this(appConfig, appConfig.getString(AppConfig.PROP_DAO_NAME));
     }
 
     /**
      * Create database writer based on configuration
      * 
-     * @param config
+     * @param appConfig
      * @param dbConfigName
      * @throws DataAccessObjectInitializationException
      */
-    DatabaseWriter(Config config, String dbConfigName) throws DataAccessObjectInitializationException {
-        this.config = config;
-        String dbConfigFilename = config.constructConfigFilePath(DatabaseContext.DEFAULT_CONFIG_FILENAME);
+    DatabaseWriter(AppConfig appConfig, String dbConfigName) throws DataAccessObjectInitializationException {
+        this.appConfig = appConfig;
+        String dbConfigFilename = appConfig.constructConfigFilePath(DatabaseContext.DEFAULT_CONFIG_FILENAME);
         if (!(new File(dbConfigFilename).exists())) { throw new DataAccessObjectInitializationException(
                 Messages.getFormattedString("DatabaseDAO.errorConfigFileExists", dbConfigFilename)); //$NON-NLS-1$
         }
@@ -78,8 +79,8 @@ public class DatabaseWriter implements DataWriter {
         dbContext = new DatabaseContext(dbConfigName);
     }
 
-    DatabaseWriter(Config config, String dbConfigName, BasicDataSource dataSource, SqlConfig sqlConfig) {
-        this.config = config;
+    DatabaseWriter(AppConfig appConfig, String dbConfigName, BasicDataSource dataSource, SqlConfig sqlConfig) {
+        this.appConfig = appConfig;
         this.dataSource = dataSource;
         this.sqlConfig = sqlConfig;
         this.dbContext = new DatabaseContext(dbConfigName);
@@ -118,13 +119,13 @@ public class DatabaseWriter implements DataWriter {
         dbContext.replaceSqlParams(sqlConfig.getSqlString());
         dbContext.prepareStatement();
     }
-
+    
     /*
      * (non-Javadoc)
      * @see com.salesforce.dataloader.dao.DataWriter#writeRowList(java.util.List)
      */
     @Override
-    public boolean writeRowList(List<Row> inputRowList) throws DataAccessObjectException {
+    public boolean writeRowList(List<? extends RowInterface> inputRowList) throws DataAccessObjectException {
 
         // make sure that the update is setup and ready to go, otherwise stop
         if (!dbContext.isOpen()) { throw new DataAccessObjectInitializationException(Messages
@@ -136,13 +137,13 @@ public class DatabaseWriter implements DataWriter {
         try {
             //for batchsize = 1, don't do batching, this provides much better error output
             if(inputRowList.size() == 1) {
-                dbContext.setSqlParamValues(sqlConfig, config, inputRowList.get(0));
+                dbContext.setSqlParamValues(sqlConfig, appConfig, inputRowList.get(0));
                 currentRowNumber++;
             } else {
                 // for each row set the Sql params in the prepared statement
                 dbContext.getDataStatement().clearBatch();
-                for (Row inputRow : inputRowList) {
-                    dbContext.setSqlParamValues(sqlConfig, config, inputRow);
+                for (RowInterface inputRow : inputRowList) {
+                    dbContext.setSqlParamValues(sqlConfig, appConfig, inputRow);
                     dbContext.getDataStatement().addBatch();
                     currentRowNumber++;
                 }
@@ -231,13 +232,13 @@ public class DatabaseWriter implements DataWriter {
      * @throws DataAccessObjectException
      */
     @Override
-    public boolean writeRow(Row inputRow) throws DataAccessObjectException {
+    public boolean writeRow(RowInterface inputRow) throws DataAccessObjectException {
         // FIXME: Think about refactoring this for the caller to writeRow() and here take care of batching internally
-        List<Row> inputRowList = new ArrayList<Row>();
+        List<RowInterface> inputRowList = new ArrayList<RowInterface>();
         inputRowList.add(inputRow);
         return writeRowList(inputRowList);
     }
-
+    
     /**
      * @param sqe
      */

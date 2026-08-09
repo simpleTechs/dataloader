@@ -37,12 +37,13 @@ import org.junit.runners.Parameterized;
 
 import com.salesforce.dataloader.TestSetting;
 import com.salesforce.dataloader.TestVariant;
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.config.AppConfig;
 import com.salesforce.dataloader.controller.Controller;
 import com.salesforce.dataloader.dao.csv.CSVFileReader;
 import com.salesforce.dataloader.exception.DataAccessObjectException;
 import com.salesforce.dataloader.exception.DataAccessObjectInitializationException;
 import com.salesforce.dataloader.model.Row;
+import com.salesforce.dataloader.model.TableRow;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -67,7 +68,9 @@ public class CsvProcessWithOffsetTest extends ProcessTestBase {
     public static Collection<Object[]> getTestParameters() {
         return Arrays.asList(
                 TestVariant.defaultSettings(),
-                TestVariant.forSettings(TestSetting.BULK_API_ENABLED));
+                TestVariant.forSettings(TestSetting.BULK_API_ENABLED),
+                TestVariant.forSettings(TestSetting.BULK_API_ENABLED, TestSetting.BULK_API_CACHE_DAO_UPLOAD_ENABLED)
+                );
     }
 
     /**
@@ -139,14 +142,14 @@ public class CsvProcessWithOffsetTest extends ProcessTestBase {
                 expectedUpdates);
 
         // now check offset specs
-        String rowOffset = ctl.getConfig().getString(Config.LOAD_ROW_TO_START_AT);
+        String rowOffset = ctl.getAppConfig().getString(AppConfig.PROP_LOAD_ROW_TO_START_AT);
 
         if (rowOffset != null) {
-            verifyOffsetFromInputAndOutputFiles(iOffset, ctl.getConfig());
+            verifyOffsetFromInputAndOutputFiles(iOffset, ctl.getAppConfig());
         }
     }
 
-    private void verifyOffsetFromInputAndOutputFiles(int numberOfOffsetRows, Config cfg) throws Exception {
+    private void verifyOffsetFromInputAndOutputFiles(int numberOfOffsetRows, AppConfig cfg) throws Exception {
 
         // Find out how many rows each file has
         int numberOfSuccessRows = 0;
@@ -155,15 +158,15 @@ public class CsvProcessWithOffsetTest extends ProcessTestBase {
 
         // finding rows in input file and opening it
 
-        numberOfInputRows = getNumCsvRows(cfg, Config.DAO_NAME);
+        numberOfInputRows = getNumCsvRows(cfg, AppConfig.PROP_DAO_NAME);
 
         // finding rows in success file and opening it
-        CSVFileReader successFileReader = openConfiguredPath(cfg, Config.OUTPUT_SUCCESS);
-        numberOfSuccessRows = getNumCsvRows(cfg, Config.OUTPUT_SUCCESS);
+        CSVFileReader successFileReader = openConfiguredPath(cfg, AppConfig.PROP_OUTPUT_SUCCESS);
+        numberOfSuccessRows = getNumCsvRows(cfg, AppConfig.PROP_OUTPUT_SUCCESS);
 
         // finding rows in error file and opening it
-        CSVFileReader errorFileReader = openConfiguredPath(cfg, Config.OUTPUT_ERROR);
-        numberOfErrorRows = getNumCsvRows(cfg, Config.OUTPUT_ERROR);
+        CSVFileReader errorFileReader = openConfiguredPath(cfg, AppConfig.PROP_OUTPUT_ERROR);
+        numberOfErrorRows = getNumCsvRows(cfg, AppConfig.PROP_OUTPUT_ERROR);
 
         if (numberOfOffsetRows <= numberOfInputRows) {
             assertEquals("Number of lines between input and output do not match", numberOfInputRows,
@@ -171,30 +174,30 @@ public class CsvProcessWithOffsetTest extends ProcessTestBase {
         }
 
         // Initializations of row results
-        Row firstInputOffsetAdjustedRow = new Row();
-        Row lastInputRow = new Row();
-        Row firstSuccessRow = new Row();
-        Row lastSuccessRow = new Row();
-        Row firstErrorRow = new Row();
-        Row lastErrorRow = new Row();
+        TableRow firstInputOffsetAdjustedRow = null;
+        TableRow lastInputRow = null;
+        TableRow firstSuccessRow = null;
+        TableRow lastSuccessRow = null;
+        TableRow firstErrorRow = null;
+        TableRow lastErrorRow = null;
 
         // The next few if statements deal with the edge statements on file size...(i.e. suppose that there are no
         // errors)
         if (numberOfSuccessRows > 0) {
-            getFirstRow(firstSuccessRow, successFileReader, true, 0);
-            getLastRow(lastSuccessRow, successFileReader, true);
+            firstSuccessRow = getFirstRow(successFileReader, true, 0);
+            lastSuccessRow = getLastRow(successFileReader, true);
         }
 
         if (numberOfErrorRows > 0) {
-            getFirstRow(firstErrorRow, errorFileReader, false, 0);
-            getLastRow(lastErrorRow, errorFileReader, false);
+            firstErrorRow = getFirstRow(errorFileReader, false, 0);
+            lastErrorRow = getLastRow(errorFileReader, false);
         }
 
         if (numberOfInputRows > 0) {
-            final CSVFileReader inputFileReader = openConfiguredPath(cfg, Config.DAO_NAME);
+            final CSVFileReader inputFileReader = openConfiguredPath(cfg, AppConfig.PROP_DAO_NAME);
 
-            getFirstRow(firstInputOffsetAdjustedRow, inputFileReader, false, numberOfOffsetRows);
-            getLastRow(lastInputRow, inputFileReader, false);
+            firstInputOffsetAdjustedRow = getFirstRow(inputFileReader, false, numberOfOffsetRows);
+            lastInputRow = getLastRow(inputFileReader, false);
         }
 
         // Requirement I: First offset-adjusted row of input matches to either the error or success file's first row
@@ -208,7 +211,7 @@ public class CsvProcessWithOffsetTest extends ProcessTestBase {
         } //otherwise vacuously true
     }
 
-    private int getNumCsvRows(Config cfg, String setting) throws DataAccessObjectException {
+    private int getNumCsvRows(AppConfig cfg, String setting) throws DataAccessObjectException {
         final CSVFileReader rdr = openConfiguredPath(cfg, setting);
         try {
             return rdr.getTotalRows();
@@ -217,52 +220,39 @@ public class CsvProcessWithOffsetTest extends ProcessTestBase {
         }
     }
 
-    private CSVFileReader openConfiguredPath(Config cfg, String configSetting)
+    private CSVFileReader openConfiguredPath(AppConfig cfg, String configSetting)
             throws DataAccessObjectInitializationException {
-        final CSVFileReader rdr = new CSVFileReader(new File(cfg.getString(configSetting)), cfg);
+        final CSVFileReader rdr = new CSVFileReader(new File(cfg.getString(configSetting)), cfg, false, false);
         rdr.open();
         return rdr;
     }
 
-    private void getFirstRow(Row rowResult, CSVFileReader reader, boolean isSuccessFile, int rowOffset)
+    private TableRow getFirstRow(CSVFileReader reader, boolean isSuccessFile, int rowOffset)
             throws Exception {
-        Row firstRow = reader.readRow();
+        TableRow firstRow = reader.readTableRow();
 
         for (int i = 0; i < rowOffset; i++) {
-            firstRow = reader.readRow(); // then, for each, move down one row
+            firstRow = reader.readTableRow(); // then, for each, move down one row
         }
-
-        if (isSuccessFile) {
-            // Also ask for ID
-            rowResult.put("ID", firstRow.get("ID"));
-        }
-        if (firstRow != null && firstRow.get("NAME") != null) {
-            rowResult.put("NAME", firstRow.get("NAME"));
-        }
+        return firstRow;
     }
 
-    private void getLastRow(Row rowResult, CSVFileReader reader, boolean isSuccessFile)
+    private TableRow getLastRow(CSVFileReader reader, boolean isSuccessFile)
             throws Exception {
 
-        Row tempRow = new Row();
-        Row lastRow = new Row();
+        TableRow tempRow = null;
+        TableRow lastRow = null;
 
         // get to the last row:
-        while ((tempRow = reader.readRow()) != null) {
+        while ((tempRow = reader.readTableRow()) != null) {
             lastRow = tempRow;
         }
-
-        if (isSuccessFile) {
-            // Also ask for ID
-            rowResult.put("ID", lastRow.get("ID"));
-        }
-
-        rowResult.put("NAME", lastRow.get("NAME"));
+        return lastRow;
     }
 
     private Map<String, String> getRowOffsetTestConfig(Object offset, int numInserts) throws DataAccessObjectException {
         final Map<String, String> argMap = getUpdateTestConfig(FILE_NAME_BASE, true, DEFAULT_ACCOUNT_EXT_ID_FIELD, numInserts);
-        argMap.put(Config.LOAD_ROW_TO_START_AT, offset.toString());
+        argMap.put(AppConfig.PROP_LOAD_ROW_TO_START_AT, offset.toString());
         return argMap;
     }
 }

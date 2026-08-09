@@ -25,15 +25,16 @@
  */
 package com.salesforce.dataloader;
 
-import com.salesforce.dataloader.config.Config;
-import com.salesforce.dataloader.exception.ConfigInitializationException;
-import com.salesforce.dataloader.exception.ParameterLoadException;
+import com.salesforce.dataloader.config.AppConfig;
+
 import org.junit.Before;
 
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Properties;
 import java.util.Set;
 
 public abstract class ConfigTestBase extends TestBase {
@@ -42,8 +43,8 @@ public abstract class ConfigTestBase extends TestBase {
     @Deprecated
     protected static enum TestProperties {
         @Deprecated
-        ENTITY_DEFAULT(Config.ENTITY), @Deprecated
-        ACCOUNT_EXTID(Config.EXTERNAL_ID_FIELD);
+        ENTITY_DEFAULT(AppConfig.PROP_ENTITY), @Deprecated
+        ACCOUNT_EXTID(AppConfig.PROP_IDLOOKUP_FIELD);
 
         private final String configName;
 
@@ -65,13 +66,23 @@ public abstract class ConfigTestBase extends TestBase {
         }
     }
 
-    private final Map<String, String> testConfig;
+    private final Map<String, String> baseConfig;
 
     protected Map<String, String> getTestConfig() {
-        final HashMap<String, String> configBase = new HashMap<String, String>(this.testConfig);
-        configBase.put(Config.LAST_RUN_OUTPUT_DIR, getTestStatusDir());
+        final HashMap<String, String> configBase = new HashMap<String, String>(this.baseConfig);
+        configBase.put(AppConfig.PROP_LAST_RUN_OUTPUT_DIR, getTestStatusDir());
         for (TestProperties prop : getDefaultTestPropertiesSet()) {
             prop.putConfigSetting(configBase);
+        }
+        for (Entry<Object, Object> prop : getTestBaseProperties().entrySet()) {
+            configBase.put(prop.getKey().toString(), prop.getValue().toString());
+        }
+        configBase.put(AppConfig.CLI_OPTION_CONFIG_DIR_PROP, TEST_CONF_DIR);
+        String proxyUsername = System.getProperty(AppConfig.PROP_PROXY_USERNAME);
+        String proxyPassword = System.getProperty(AppConfig.PROP_PROXY_PASSWORD);
+        if (proxyUsername != null && proxyPassword != null) {
+            configBase.put(AppConfig.PROP_PROXY_USERNAME, proxyUsername);
+            configBase.put(AppConfig.PROP_PROXY_PASSWORD, proxyPassword);
         }
         return configBase;
     }
@@ -91,24 +102,11 @@ public abstract class ConfigTestBase extends TestBase {
         if (testConfig == null) {
             testConfig = new HashMap<String, String>();
         }
-        this.testConfig = testConfig;
+        this.baseConfig = testConfig;
     }
 
     @Before
-    public void loadParameterOverrides() throws Exception {
-        getController().getConfig().loadParameterOverrides(getTestConfig());
+    public void setupController() throws Exception {
+        super.setupController(getTestConfig());
     }
-
-    @Override
-    protected void setupController() {
-        super.setupController();
-        try {
-            getController().getConfig().loadParameterOverrides(getTestConfig());
-        } catch (ParameterLoadException e) {
-            fail(e);
-        } catch (ConfigInitializationException e) {
-            fail(e);
-        }
-    }
-
 }

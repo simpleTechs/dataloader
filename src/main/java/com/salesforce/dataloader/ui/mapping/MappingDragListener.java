@@ -63,15 +63,15 @@ public class MappingDragListener extends DragSourceAdapter {
                 IStructuredSelection selection = (IStructuredSelection)viewer.getSelection();
                 Field[] fields = (Field[])viewer.getInput();
                 ArrayList<Field> fieldList = new ArrayList<Field>(Arrays.asList(fields));
-                for (Iterator it = selection.iterator(); it.hasNext();) {
+                for (Iterator<?> it = selection.iterator(); it.hasNext();) {
                     Field eventField = (Field)it.next();
                     fieldList.remove(eventField);
                 }
 
-                Field[] newFields = fieldList.toArray(new Field[fieldList.size()]);
-                dlg.setFields(newFields);
+                Field[] unmappedSobjectFields = fieldList.toArray(new Field[fieldList.size()]);
+                dlg.setUnmappedSobjectFields(unmappedSobjectFields);
 
-                viewer.setInput(newFields);
+                viewer.setInput(unmappedSobjectFields);
                 viewer.refresh();
             }
         } catch (Exception e) {

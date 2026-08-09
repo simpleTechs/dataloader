@@ -28,6 +28,7 @@ package com.salesforce.dataloader.process;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 import org.apache.commons.io.IOUtils;
@@ -35,9 +36,12 @@ import org.junit.Before;
 import org.junit.Test;
 
 import com.salesforce.dataloader.action.OperationInfo;
-import com.salesforce.dataloader.config.Config;
+import com.salesforce.dataloader.config.AppConfig;
+import com.salesforce.dataloader.dao.csv.CSVFileReader;
 import com.salesforce.dataloader.exception.DataAccessObjectException;
+import com.salesforce.dataloader.exception.DataAccessObjectInitializationException;
 import com.salesforce.dataloader.exception.ProcessInitializationException;
+import com.salesforce.dataloader.model.TableRow;
 import com.sforce.async.CSVReader;
 import com.sforce.soap.partner.sobject.SObject;
 import com.sforce.ws.ConnectionException;
@@ -58,9 +62,9 @@ public class CsvExtractAggregateQueryProcessTest extends ProcessTestBase {
     @Before
     public void setUpTestConfig() {
         testConfig = getTestConfig(OperationInfo.extract, true);
-        testConfig.put(Config.ENTITY, "Contact");
-        testConfig.put(Config.ENABLE_EXTRACT_STATUS_OUTPUT, Config.TRUE);
-        testConfig.remove(Config.MAPPING_FILE);
+        testConfig.put(AppConfig.PROP_ENTITY, "Contact");
+        testConfig.put(AppConfig.PROP_ENABLE_EXTRACT_STATUS_OUTPUT, AppConfig.TRUE);
+        testConfig.remove(AppConfig.PROP_MAPPING_FILE);
     }
 
     @Test
@@ -68,20 +72,41 @@ public class CsvExtractAggregateQueryProcessTest extends ProcessTestBase {
         String accountId = insertAccount("acctNameXyz");
         String contactId = insertContact(accountId);
         runExtraction("select Count(Id), Account.Name from Contact where Id='" + contactId + "' GROUP BY Account.Name");
-        validateAccountNameInOutputFile("acctNameXyz");
+        validateAccountNameInOutputFile("acctNameXyz", true);
+        runExtractionDoNotLimitOutputToQueryFields("select Count(Id), Account.Name from Contact where Id='" + contactId + "' GROUP BY Account.Name");
+        validateAccountNameInOutputFile("acctNameXyz", false);
     }
 
     private void runExtraction(String extractionQuery) throws ProcessInitializationException, DataAccessObjectException {
-        testConfig.put(Config.EXTRACT_SOQL, extractionQuery);
+        testConfig.put(AppConfig.PROP_EXTRACT_SOQL, extractionQuery);
+        testConfig.put(AppConfig.PROP_LIMIT_OUTPUT_TO_QUERY_FIELDS, AppConfig.TRUE);
         runProcess(testConfig, 1, true);
     }
 
-    private void validateAccountNameInOutputFile(final String accountName) throws IOException {
-        FileInputStream fis = new FileInputStream(new File(testConfig.get(Config.DAO_NAME)));
+    private void runExtractionDoNotLimitOutputToQueryFields(String extractionQuery) throws ProcessInitializationException, DataAccessObjectException {
+        testConfig.put(AppConfig.PROP_EXTRACT_SOQL, extractionQuery);
+        testConfig.put(AppConfig.PROP_LIMIT_OUTPUT_TO_QUERY_FIELDS, AppConfig.FALSE);
+        runProcess(testConfig, 1, true);
+    }
+
+    private void validateAccountNameInOutputFile(final String accountName, boolean isLimitOutputToQueryFields) throws IOException {
+        FileInputStream fis = new FileInputStream(new File(testConfig.get(AppConfig.PROP_DAO_NAME)));
         try {
-            CSVReader rdr = new CSVReader(fis, "UTF-8");
-            int acctNameIndex = rdr.nextRecord().indexOf("ACCOUNT.NAME");
-            assertEquals(accountName, rdr.nextRecord().get(acctNameIndex));
+            CSVFileReader rdr = new CSVFileReader(new File(testConfig.get(AppConfig.PROP_DAO_NAME)),
+                    this.getController().getAppConfig(), false, true);
+            rdr.open();
+            TableRow row = rdr.readTableRow();
+            String extractedNameVal = (String)row.get("Name");
+            if (isLimitOutputToQueryFields) {
+                extractedNameVal = (String)row.get("Account.Name");
+            }
+            assertEquals(accountName, extractedNameVal);
+        } catch (DataAccessObjectInitializationException e) {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+        } catch (DataAccessObjectException e) {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
         } finally {
             IOUtils.closeQuietly(fis);
         }
